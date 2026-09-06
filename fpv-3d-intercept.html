@@ -1,0 +1,906 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FPV // INTERCEPT</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+canvas { display:block; }
+#overlay {
+  position:absolute; top:0; left:0;
+  pointer-events:none;
+}
+
+/* ── GLASS STATS PANEL ── */
+#stats-panel {
+  position: absolute;
+  bottom: 5%;
+  left: 5%;
+  right: 5%;
+  background: rgba(255,255,255,0.04);
+  backdrop-filter: blur(6px) saturate(1.2);
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-top: 1px solid rgba(255,255,255,0.22);
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  border-radius: 16px;
+  padding: 16px 40px 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 0 40px rgba(255,255,255,0.02),
+    0 4px 24px rgba(0,0,0,0.08);
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+  pointer-events: none;
+}
+#stats-since {
+  font-size: 9px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.50);
+  margin-bottom: 11px;
+}
+#stats-rows {
+  display: flex;
+  gap: 28px;
+  justify-content: center;
+  align-items: baseline;
+}
+.stat-item { display:flex; flex-direction:column; align-items:center; gap:5px; }
+.stat-val {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: rgba(255,255,255,0.92);
+  line-height: 1;
+}
+.stat-val.accent { color: rgba(255,255,255,0.95); }
+.stat-label {
+  font-size: 8px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.50);
+}
+.stat-sub {
+  font-size: 8.5px;
+  color: rgba(255,255,255,0.45);
+  margin-top: 1px;
+  letter-spacing: 0.4px;
+}
+.divider {
+  width: 1px; height: 30px;
+  background: rgba(255,255,255,0.10);
+  align-self: center;
+}
+
+/* ── HUD ── */
+#hud {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  pointer-events:none;
+}
+#status {
+  position:absolute; top:24px; left:28px;
+  color:rgba(0,210,255,0.55); font-size:10px;
+  letter-spacing:3px; line-height:2.1;
+}
+#flash {
+  position:absolute; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  font-size:clamp(13px,2.2vw,22px);
+  letter-spacing:8px; text-transform:uppercase;
+  text-align:center; opacity:0;
+  transition:opacity 0.25s;
+  text-shadow:0 0 28px currentColor;
+  white-space:nowrap;
+  pointer-events:none;
+}
+#flash.on { opacity:1; }
+#corner {
+  position:absolute; bottom:22px; right:24px;
+  color:rgba(255,255,255,0.13); font-size:9px; letter-spacing:3px;
+}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<canvas id="overlay"></canvas>
+
+<!-- Glass Stats Panel -->
+<div id="stats-panel">
+  <div id="stats-since">Since your last visit</div>
+  <div id="stats-rows">
+    <div class="stat-item">
+      <div class="stat-val accent" id="val-destroyed">3</div>
+      <div class="stat-label">Destroyed</div>
+      <div class="stat-sub">Shaheds neutralized</div>
+    </div>
+    <div class="divider"></div>
+    <div class="stat-item">
+      <div class="stat-val accent" id="val-impact">1</div>
+      <div class="stat-label">Your impact</div>
+      <div class="stat-sub">15% of your donation</div>
+    </div>
+  </div>
+</div>
+
+<div id="hud">
+  <div id="status">
+    <div id="sl1"></div>
+    <div id="sl2" style="opacity:.45">TARGET: SHAHED-136</div>
+    <div id="sl3" style="opacity:.45">SPD: —</div>
+  </div>
+  <div id="flash"></div>
+  <div id="corner">DRAG · SCROLL</div>
+</div>
+
+<script type="importmap">
+{"imports":{"three":"https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ═══════════════════════════════════════════════════
+// CONSTANTS
+// ═══════════════════════════════════════════════════
+const N_SH       = 10000;
+const N_FPV      = 1500;
+const N          = N_SH + N_FPV;
+const N_FPV_BODY = 600;                    // static: arms, motors, frame
+const N_FPV_PROP = N_FPV - N_FPV_BODY;    // 900: rotating propellers
+const PROP_PER   = Math.floor(N_FPV_PROP / 4);
+const A_FPV      = 7.5;
+const FPV_SIGNS  = [[1,1],[1,-1],[-1,1],[-1,-1]];
+const PROP_DIR   = [1,-1,1,-1];
+const PROP_SPD   = [8.5,9.1,8.8,9.3];
+
+// ═══════════════════════════════════════════════════
+// RENDERER
+// ═══════════════════════════════════════════════════
+const canvas = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000008, 0.0045);
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 2000);
+
+// ═══════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════
+const eio  = t => t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+const eout = t => 1-(1-t)*(1-t);
+const lerp = (a,b,t) => a+(b-a)*t;
+
+function mkPoints(n, ptSize, opacity) {
+  const pa = new Float32Array(n*3);
+  const ca = new Float32Array(n*3);
+  const g  = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.BufferAttribute(pa, 3));
+  g.setAttribute('color',    new THREE.BufferAttribute(ca, 3));
+  const m = new THREE.PointsMaterial({
+    size:ptSize, vertexColors:true, transparent:true, opacity,
+    blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+  });
+  scene.add(new THREE.Points(g, m));
+  return { pa, ca, g };
+}
+
+// ═══════════════════════════════════════════════════
+// GEOMETRY LAYERS
+// ═══════════════════════════════════════════════════
+const main  = mkPoints(N,     0.50, 1.00); // shahed + fpv body+props
+const glow  = mkPoints(N,     3.00, 0.055);
+const trail = mkPoints(N_FPV_PROP * 6, 0.85, 0.40); // prop trails
+
+// Wind streaks — always alive, respawn when dead
+const N_WSH = 2100, N_WFPV = 1050;
+const wsh  = mkPoints(N_WSH,  0.50, 0.60);
+const wfpv = mkPoints(N_WFPV, 0.42, 0.55);
+
+// ═══════════════════════════════════════════════════
+// PHYSICS BUFFERS
+// ═══════════════════════════════════════════════════
+const curPos = new Float32Array(N*3);
+const expVel = new Float32Array(N*3);
+
+for (let i=0;i<N;i++) {
+  curPos[i*3]  =(Math.random()-.5)*200;
+  curPos[i*3+1]=(Math.random()-.5)*200;
+  curPos[i*3+2]=(Math.random()-.5)*200;
+}
+
+// ═══════════════════════════════════════════════════
+// SHAPE BUILDERS
+// ═══════════════════════════════════════════════════
+function buildShahed() {
+  const out = new Float32Array(N_SH*3);
+  const W=38, L=28;
+  for (let i=0;i<N_SH;i++) {
+    const r=Math.random(); let x=0,y=0,z=0;
+    if (r<0.56) {
+      const side=Math.random()<.5?1:-1, span=Math.random();
+      const xLE=L*.55-span*(L*.55+L*.45);
+      const xTE=-L*.45+span*L*.08;
+      x=xTE+Math.random()*(xLE-xTE); z=side*span*W;
+      y=(Math.random()-.5)*(0.5+span*0.3);
+    } else if (r<0.74) {
+      const fx=(Math.random()-.5)*L*.85, ang=Math.random()*Math.PI*2;
+      const frac=(fx+L*.425)/(L*.85);
+      const rad=0.8+frac*(2.5-0.8)*Math.sin(frac*Math.PI);
+      x=fx; y=Math.cos(ang)*rad; z=Math.sin(ang)*rad*.75;
+    } else if (r<0.86) {
+      x=-(L*.22+Math.random()*L*.22); y=1.8+Math.random()*W*.26; z=(Math.random()-.5)*.7;
+    } else if (r<0.95) {
+      const ang=Math.random()*Math.PI*2, rad=1.0+Math.random()*1.6;
+      x=-(L*.42+Math.random()*L*.06); y=0.5+Math.cos(ang)*rad; z=Math.sin(ang)*rad*.9;
+    } else {
+      const ang=Math.random()*Math.PI*2, rad=Math.random()*1.2;
+      x=-L*.50; y=0.5+Math.cos(ang)*rad*.6; z=Math.sin(ang)*rad*.6;
+    }
+    out[i*3]=x; out[i*3+1]=y; out[i*3+2]=z;
+  }
+  return out;
+}
+
+function buildFPVBody() {
+  const out = new Float32Array(N_FPV_BODY*3);
+  for (let i=0;i<N_FPV_BODY;i++) {
+    const r=Math.random(); let x=0,y=0,z=0;
+    if (r<0.38) {
+      const [sx,sz]=FPV_SIGNS[Math.floor(Math.random()*4)], t=Math.random();
+      x=sx*t*A_FPV*.72+(Math.random()-.5)*.18; y=(Math.random()-.5)*.28;
+      z=sz*t*A_FPV*.72+(Math.random()-.5)*.18;
+    } else if (r<0.66) {
+      const [sx,sz]=FPV_SIGNS[Math.floor(Math.random()*4)];
+      const ang=Math.random()*Math.PI*2, rad=0.3+Math.random()*.8;
+      x=sx*A_FPV*.72+Math.cos(ang)*rad; y=(Math.random()-.5)*1.1;
+      z=sz*A_FPV*.72+Math.sin(ang)*rad;
+    } else if (r<0.88) {
+      x=(Math.random()-.5)*A_FPV*.40; y=(Math.random()-.5)*1.2;
+      z=(Math.random()-.5)*A_FPV*.34;
+    } else {
+      x=A_FPV*.24+Math.random()*A_FPV*.10; y=-0.3+(Math.random()-.5)*.5;
+      z=(Math.random()-.5)*.85;
+    }
+    out[i*3]=x; out[i*3+1]=y; out[i*3+2]=z;
+  }
+  return out;
+}
+
+// Prop metadata: per-particle [armIdx, radius, yOff, phase]
+const propMeta = new Float32Array(N_FPV_PROP*4);
+for (let i=0;i<N_FPV_PROP;i++) {
+  propMeta[i*4]  =Math.floor(i/PROP_PER)%4;
+  propMeta[i*4+1]=1.3+Math.random()*2.1;
+  propMeta[i*4+2]=(Math.random()-.5)*.08;
+  propMeta[i*4+3]=Math.random()*Math.PI*2;
+}
+
+const shRest  = buildShahed();
+const fpbRest = buildFPVBody();
+
+// ═══════════════════════════════════════════════════
+// SCENE OBJECTS
+// ═══════════════════════════════════════════════════
+const shC = new THREE.Vector3(0,0,0);
+const fpC = new THREE.Vector3(-55,-12,6);
+const fpV = new THREE.Vector3(0.3,0.08,-0.04);
+
+// Working target buffers
+const shTgt  = new Float32Array(N_SH*3);
+const fpbTgt = new Float32Array(N_FPV_BODY*3);
+
+function updSH()  { for(let i=0;i<N_SH;i++)       { shTgt[i*3]=shRest[i*3]+shC.x;   shTgt[i*3+1]=shRest[i*3+1]+shC.y;   shTgt[i*3+2]=shRest[i*3+2]+shC.z;   } }
+function updFPVb(){ for(let i=0;i<N_FPV_BODY;i++) { fpbTgt[i*3]=fpbRest[i*3]+fpC.x; fpbTgt[i*3+1]=fpbRest[i*3+1]+fpC.y; fpbTgt[i*3+2]=fpbRest[i*3+2]+fpC.z; } }
+updSH(); updFPVb();
+
+const camLook   = new THREE.Vector3(0,0,0);
+const camTarget = new THREE.Vector3(0,0,0);
+
+// ═══════════════════════════════════════════════════
+// WIND STREAK SYSTEM
+// ═══════════════════════════════════════════════════
+// Each streak: position + velocity + life
+const wshData  = new Float32Array(N_WSH  * 7); // x,y,z, vx,vy,vz, life
+const wfpvData = new Float32Array(N_WFPV * 7);
+
+function spawnSHStreak(buf, i) {
+  const o = i*7;
+  const W=38, L=28;
+  const span=Math.random(), side=Math.random()<.5?1:-1;
+  const xLE = L*.55 - span*(L*.55+L*.45);
+  buf[o]   = shC.x + xLE + (Math.random()-.5)*4;
+  buf[o+1] = shC.y + (Math.random()-.5)*2;
+  buf[o+2] = shC.z + side*span*W*(0.6+Math.random()*.4);
+  const spd = 20+Math.random()*14;
+  buf[o+3] = -spd;
+  buf[o+4] = (Math.random()-.5)*2;
+  buf[o+5] = -side*Math.random()*3;
+  buf[o+6] = 0.20+Math.random()*.30; // life
+}
+
+function spawnFPVStreak(buf, i) {
+  const o = i*7;
+  buf[o]   = fpC.x + (Math.random()-.5)*4;
+  buf[o+1] = fpC.y + (Math.random()-.5)*2.5;
+  buf[o+2] = fpC.z + (Math.random()-.5)*4;
+  const spd = 25+Math.random()*18;
+  buf[o+3] = -spd*(0.85+Math.random()*.15);
+  buf[o+4] = (Math.random()-.5)*5;
+  buf[o+5] = (Math.random()-.5)*5;
+  buf[o+6] = 0.15+Math.random()*.20;
+}
+
+// Init with random life offsets so they don't all start at once
+for (let i=0;i<N_WSH;  i++) { spawnSHStreak(wshData, i);  wshData[i*7+6]  *= Math.random(); }
+for (let i=0;i<N_WFPV; i++) { spawnFPVStreak(wfpvData,i); wfpvData[i*7+6] *= Math.random(); }
+
+// Max life reference (for alpha calc) — stored separately
+const wshLife0  = new Float32Array(N_WSH);
+const wfpvLife0 = new Float32Array(N_WFPV);
+for (let i=0;i<N_WSH;  i++) wshLife0[i]  = 0.20+Math.random()*.30;
+for (let i=0;i<N_WFPV; i++) wfpvLife0[i] = 0.15+Math.random()*.20;
+
+// ═══════════════════════════════════════════════════
+// PROP TRAIL CIRCULAR BUFFER
+// ═══════════════════════════════════════════════════
+const TRAIL_SLOTS = 6;
+const trailBuf = new Float32Array(N_FPV_PROP * TRAIL_SLOTS * 3);
+const trailAge  = new Float32Array(N_FPV_PROP * TRAIL_SLOTS); // 0=oldest,1=newest
+let trailHead   = 0;
+const propAngle = [0,0,0,0];
+
+// ═══════════════════════════════════════════════════
+// OVERLAY CANVAS — target reticle drawn here
+// ═══════════════════════════════════════════════════
+const oc  = document.getElementById('overlay');
+const octx= oc.getContext('2d');
+function resizeOverlay(){
+  oc.width  = innerWidth;
+  oc.height = innerHeight;
+}
+resizeOverlay();
+
+// ═══════════════════════════════════════════════════
+// STATE MACHINE
+// ═══════════════════════════════════════════════════
+const DUR=[3.2, 2.2, 999, 2.2, 3.5, 3.2];
+let phase=0, phaseT=0;
+
+// ═══════════════════════════════════════════════════
+// TYPEWRITER HUD
+// ═══════════════════════════════════════════════════
+const sl1=document.getElementById('sl1');
+const sl3=document.getElementById('sl3');
+const flashEl=document.getElementById('flash');
+let flashCd=0;
+
+// Typewriter queue
+let twTarget='', twCurrent='', twTimer=0;
+const TW_SPEED=0.045; // seconds per char
+
+function setStatus(txt){
+  twTarget  = txt;
+  twCurrent = '';
+  twTimer   = 0;
+}
+
+function tickTypewriter(dt){
+  if(twCurrent===twTarget) return;
+  twTimer+=dt;
+  const chars=Math.min(Math.floor(twTimer/TW_SPEED), twTarget.length);
+  twCurrent=twTarget.slice(0,chars);
+  // add blinking cursor if not done
+  sl1.textContent = twCurrent + (twCurrent.length<twTarget.length ? '█' : '');
+}
+
+function flash(txt,color){
+  flashEl.textContent='';
+  flashEl.style.color=color||'#fff';
+  flashEl.classList.add('on');
+  flashCd=2.5;
+  // typewrite the flash text too
+  let fi=0;
+  const iv=setInterval(()=>{
+    fi++;
+    flashEl.textContent=txt.slice(0,fi);
+    if(fi>=txt.length) clearInterval(iv);
+  },30);
+}
+
+// Phase label map (English)
+const PHASE_LABEL=[
+  '// INITIALIZING',
+  '// MONITORING',
+  '// INTERCEPTING',
+  '// IMPACT',
+  '// DESTROYED',
+  '// REBUILDING',
+];
+
+// ═══════════════════════════════════════════════════
+// TARGET RETICLE STATE
+// ═══════════════════════════════════════════════════
+let reticleAlpha  = 0;   // 0=hidden, 1=visible
+let reticleLocked = false;
+let reticlePulse  = 0;
+let reticleX      = 0;
+let reticleY      = 0;
+let scanLine      = 0;   // rotating scan angle
+
+// Project 3D point to 2D screen
+function project(wx,wy,wz){
+  const v=new THREE.Vector3(wx,wy,wz);
+  v.project(camera);
+  return {
+    x: (v.x*.5+.5)*innerWidth,
+    y: (-.5*v.y+.5)*innerHeight,
+    z: v.z
+  };
+}
+
+function drawTargetUI(t){
+  octx.clearRect(0,0,oc.width,oc.height);
+  if(reticleAlpha<=0) return;
+
+  const cx=reticleX, cy=reticleY;
+  const a=reticleAlpha;
+  const locked=reticleLocked;
+  const sz= locked ? 42 : 55;
+  const corner=12;
+  const color= locked ? `rgba(255,60,40,${a})` : `rgba(0,210,255,${a})`;
+  const colorDim= locked ? `rgba(255,60,40,${a*.35})` : `rgba(0,210,255,${a*.3})`;
+
+  octx.save();
+  octx.strokeStyle=color;
+  octx.lineWidth=1.5;
+
+  // ── Corner brackets ──
+  const corners=[[1,1],[-1,1],[1,-1],[-1,-1]];
+  corners.forEach(([sx,sy])=>{
+    octx.beginPath();
+    octx.moveTo(cx+sx*sz,         cy+sy*(sz-corner));
+    octx.lineTo(cx+sx*sz,         cy+sy*sz);
+    octx.lineTo(cx+sx*(sz-corner),cy+sy*sz);
+    octx.stroke();
+  });
+
+  // ── Center cross (tiny) ──
+  octx.strokeStyle=color;
+  octx.lineWidth=1;
+  octx.beginPath();
+  octx.moveTo(cx-6,cy); octx.lineTo(cx-2,cy);
+  octx.moveTo(cx+2,cy); octx.lineTo(cx+6,cy);
+  octx.moveTo(cx,cy-6); octx.lineTo(cx,cy-2);
+  octx.moveTo(cx,cy+2); octx.lineTo(cx,cy+6);
+  octx.stroke();
+
+  // ── Scan ring (rotating when not locked) ──
+  if(!locked){
+    octx.strokeStyle=colorDim;
+    octx.lineWidth=1;
+    octx.setLineDash([8,14]);
+    octx.lineDashOffset=-scanLine*80;
+    octx.beginPath();
+    octx.arc(cx,cy,sz+8,0,Math.PI*2);
+    octx.stroke();
+    octx.setLineDash([]);
+  }
+
+  // ── Pulse ring on lock ──
+  if(locked){
+    const pr=sz+6+reticlePulse*22;
+    const pa=a*(1-reticlePulse);
+    octx.strokeStyle=`rgba(255,60,40,${pa})`;
+    octx.lineWidth=1.5;
+    octx.beginPath();
+    octx.arc(cx,cy,pr,0,Math.PI*2);
+    octx.stroke();
+  }
+
+  // ── Labels ──
+  octx.font=`9px 'Courier New'`;
+  octx.fillStyle=color;
+  octx.textAlign='left';
+
+  if(!locked){
+    octx.globalAlpha=a*.7;
+    octx.fillText('TRACKING',cx+sz+8,cy-4);
+    octx.fillText('SHAHED-136',cx+sz+8,cy+8);
+  } else {
+    octx.globalAlpha=a;
+    octx.fillText('LOCKED',cx+sz+8,cy-4);
+    octx.fillText('SHAHED-136',cx+sz+8,cy+8);
+    octx.fillStyle=`rgba(255,60,40,${a*.6})`;
+    octx.fillText('INTERCEPTING',cx+sz+8,cy+20);
+  }
+
+  // ── Distance readout (bottom-left of reticle) ──
+  if(phase===2){
+    const dx=shC.x-fpC.x,dy=shC.y-fpC.y,dz=shC.z-fpC.z;
+    const d=(Math.sqrt(dx*dx+dy*dy+dz*dz)*2.5).toFixed(0);
+    octx.fillStyle=color;
+    octx.textAlign='center';
+    octx.globalAlpha=a*.8;
+    octx.fillText(`${d}m`,cx,cy+sz+18);
+  }
+
+  octx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// ORBIT
+// ═══════════════════════════════════════════════════
+let isDrag=false,lmx=0,lmy=0,orbY=0.2,orbX=0.08,autoR=0,camDist=130;
+canvas.addEventListener('mousedown',e=>{isDrag=true;lmx=e.clientX;lmy=e.clientY;});
+window.addEventListener('mouseup',()=>isDrag=false);
+window.addEventListener('mousemove',e=>{
+  if(!isDrag)return;
+  orbY+=(e.clientX-lmx)*.007; orbX+=(e.clientY-lmy)*.007;
+  orbX=Math.max(-1.1,Math.min(1.1,orbX)); lmx=e.clientX;lmy=e.clientY;
+});
+canvas.addEventListener('wheel',e=>{camDist=Math.max(40,Math.min(300,camDist+e.deltaY*.18));},{passive:true});
+canvas.addEventListener('touchstart',e=>{isDrag=true;lmx=e.touches[0].clientX;lmy=e.touches[0].clientY;},{passive:true});
+window.addEventListener('touchend',()=>isDrag=false);
+window.addEventListener('touchmove',e=>{
+  if(!isDrag)return;
+  orbY+=(e.touches[0].clientX-lmx)*.009; orbX+=(e.touches[0].clientY-lmy)*.009;
+  lmx=e.touches[0].clientX;lmy=e.touches[0].clientY;
+},{passive:true});
+
+// ═══════════════════════════════════════════════════
+// MAIN LOOP
+// ═══════════════════════════════════════════════════
+let lastNow=performance.now();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  const dt=Math.min((now-lastNow)*.001,.05);
+  lastNow=now;
+  const t=now*.001;
+
+  if(flashCd>0){flashCd-=dt;if(flashCd<=0)flashEl.classList.remove('on');}
+  phaseT+=dt;
+  tickTypewriter(dt);
+  scanLine+=dt*0.4;
+
+  camTarget.set((shC.x+fpC.x)*.5,(shC.y+fpC.y)*.5+2,(shC.z+fpC.z)*.5);
+
+  // ── PHASES ────────────────────────────────────────────────
+  if (phase===0) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[0]);
+    reticleAlpha=0;
+    const e=eio(Math.min(phaseT/DUR[0],1))*.10;
+    updSH(); updFPVb();
+    for(let i=0;i<N_SH;i++){
+      curPos[i*3]  +=(shTgt[i*3]  -curPos[i*3])  *e;
+      curPos[i*3+1]+=(shTgt[i*3+1]-curPos[i*3+1])*e;
+      curPos[i*3+2]+=(shTgt[i*3+2]-curPos[i*3+2])*e;
+    }
+    for(let i=0;i<N_FPV_BODY;i++){
+      const gi=N_SH+i;
+      curPos[gi*3]  +=(fpbTgt[i*3]  -curPos[gi*3])  *e;
+      curPos[gi*3+1]+=(fpbTgt[i*3+1]-curPos[gi*3+1])*e;
+      curPos[gi*3+2]+=(fpbTgt[i*3+2]-curPos[gi*3+2])*e;
+    }
+    if(phaseT>=DUR[0]){phase=1;phaseT=0;flash('TARGET ACQUIRED','#00d2ff');}
+  }
+
+  else if (phase===1) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[1]);
+    // Reticle appears, scanning
+    reticleAlpha=Math.min(reticleAlpha+dt*1.2,1);
+    reticleLocked=false;
+    reticlePulse=0;
+    const breathe=Math.sin(t*1.1)*.4;
+    updSH(); updFPVb();
+    for(let i=0;i<N_SH;i++){
+      const tx=shTgt[i*3]+Math.sin(t*.4+i*.001)*.3;
+      const ty=shTgt[i*3+1]+Math.cos(t*.35+i*.0013)*.25+breathe;
+      const tz=shTgt[i*3+2]+Math.sin(t*.28+i*.0008)*.22;
+      curPos[i*3]  +=(tx-curPos[i*3])  *.03;
+      curPos[i*3+1]+=(ty-curPos[i*3+1])*.03;
+      curPos[i*3+2]+=(tz-curPos[i*3+2])*.03;
+    }
+    for(let i=0;i<N_FPV_BODY;i++){
+      const gi=N_SH+i;
+      curPos[gi*3]  +=(fpbTgt[i*3]  -curPos[gi*3])  *.035;
+      curPos[gi*3+1]+=(fpbTgt[i*3+1]-curPos[gi*3+1])*.035;
+      curPos[gi*3+2]+=(fpbTgt[i*3+2]-curPos[gi*3+2])*.035;
+    }
+    if(phaseT>=DUR[1]){phase=2;phaseT=0;flash('INTERCEPT INITIATED','#ff8800');}
+  }
+
+  else if (phase===2) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[2]);
+    // Lock reticle after 0.8s
+    if(phaseT>0.8&&!reticleLocked){
+      reticleLocked=true;
+      reticlePulse=0;
+    }
+    if(reticleLocked) reticlePulse=Math.min(reticlePulse+dt*.7,1);
+
+    shC.x+=0.40+phaseT*.03;
+    shC.y+=Math.sin(t*.5)*.04;
+    shC.z+=Math.cos(t*.3)*.025;
+
+    const dx=shC.x-fpC.x, dy=shC.y-fpC.y, dz=shC.z-fpC.z;
+    const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const maxSpd=Math.min(0.5+phaseT*.22,5.0);
+    fpV.x+=(dx/dist)*.20; fpV.y+=(dy/dist)*.12; fpV.z+=(dz/dist)*.15;
+    const fspd=Math.sqrt(fpV.x*fpV.x+fpV.y*fpV.y+fpV.z*fpV.z);
+    if(fspd>maxSpd){const sc=maxSpd/fspd;fpV.x*=sc;fpV.y*=sc;fpV.z*=sc;}
+    fpC.x+=fpV.x; fpC.y+=fpV.y; fpC.z+=fpV.z;
+    sl3.textContent=`SPD: ${(fspd*22).toFixed(0)} km/h`;
+
+    updSH(); updFPVb();
+    for(let i=0;i<N_SH;i++){
+      curPos[i*3]  +=(shTgt[i*3]  -curPos[i*3])  *.18;
+      curPos[i*3+1]+=(shTgt[i*3+1]-curPos[i*3+1])*.18;
+      curPos[i*3+2]+=(shTgt[i*3+2]-curPos[i*3+2])*.18;
+    }
+    for(let i=0;i<N_FPV_BODY;i++){
+      const gi=N_SH+i;
+      curPos[gi*3]  +=(fpbTgt[i*3]  -curPos[gi*3])  *.22;
+      curPos[gi*3+1]+=(fpbTgt[i*3+1]-curPos[gi*3+1])*.22;
+      curPos[gi*3+2]+=(fpbTgt[i*3+2]-curPos[gi*3+2])*.22;
+    }
+
+    if(dist<16){
+      phase=3;phaseT=0;flash('IMPACT','#ff2200');sl3.textContent='SPD: —';
+      reticleAlpha=0;
+      for(let i=0;i<N;i++){
+        const ang=Math.random()*Math.PI*2, elev=(Math.random()-.5)*Math.PI;
+        const sp=25+Math.random()*90;
+        expVel[i*3]=Math.cos(elev)*Math.cos(ang)*sp;
+        expVel[i*3+1]=Math.sin(elev)*sp*.8+10;
+        expVel[i*3+2]=Math.cos(elev)*Math.sin(ang)*sp;
+      }
+    }
+  }
+
+  else if (phase===3) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[3]);
+    reticleAlpha=Math.max(reticleAlpha-dt*3,0);
+    const drag=1-eout(Math.min(phaseT/DUR[3],1))*.7;
+    for(let i=0;i<N;i++){
+      curPos[i*3]  +=expVel[i*3]  *dt*drag;
+      curPos[i*3+1]+=expVel[i*3+1]*dt*drag;
+      curPos[i*3+2]+=expVel[i*3+2]*dt*drag;
+      expVel[i*3+1]-=16*dt;
+    }
+    if(phaseT>=DUR[3]){phase=4;phaseT=0;flash('DESTROYED','#ffd700');}
+  }
+
+  else if (phase===4) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[4]);
+    const ashT=Math.min(phaseT/DUR[4],1);
+    const grav=lerp(8,28,ashT);
+    const hDrag=lerp(0.06,0.02,ashT);
+    for(let i=0;i<N;i++){
+      curPos[i*3]  +=expVel[i*3]  *dt*hDrag;
+      curPos[i*3+1]+=expVel[i*3+1]*dt*hDrag-grav*dt;
+      curPos[i*3+2]+=expVel[i*3+2]*dt*hDrag;
+      curPos[i*3]  +=(Math.random()-.5)*.08*dt;
+      curPos[i*3+2]+=(Math.random()-.5)*.08*dt;
+    }
+    if(phaseT>=DUR[4]){
+      phase=5;phaseT=0;flash('RESTARTING','#00d2ff');
+      shC.set(0,0,0);fpC.set(-55,-12,6);fpV.set(0.3,0.08,-0.04);
+      updSH();updFPVb();
+    }
+  }
+
+  else if (phase===5) {
+    if(phaseT<0.05) setStatus(PHASE_LABEL[5]);
+    const e=eio(Math.min(phaseT/DUR[5],1))*.08;
+    updSH();updFPVb();
+    for(let i=0;i<N_SH;i++){
+      curPos[i*3]  +=(shTgt[i*3]  -curPos[i*3])  *e;
+      curPos[i*3+1]+=(shTgt[i*3+1]-curPos[i*3+1])*e;
+      curPos[i*3+2]+=(shTgt[i*3+2]-curPos[i*3+2])*e;
+    }
+    for(let i=0;i<N_FPV_BODY;i++){
+      const gi=N_SH+i;
+      curPos[gi*3]  +=(fpbTgt[i*3]  -curPos[gi*3])  *e;
+      curPos[gi*3+1]+=(fpbTgt[i*3+1]-curPos[gi*3+1])*e;
+      curPos[gi*3+2]+=(fpbTgt[i*3+2]-curPos[gi*3+2])*e;
+    }
+    if(phaseT>=DUR[5]){phase=1;phaseT=0;}
+  }
+
+  // ── PROPELLER ROTATION ─────────────────────────────────────
+  const propsOn = phase<3||phase===5;
+  const spinMult= phase===2 ? Math.min(1.0+phaseT*.15,1.8) : 1.0;
+  if(propsOn){ for(let a=0;a<4;a++) propAngle[a]+=PROP_SPD[a]*PROP_DIR[a]*spinMult*dt; }
+
+  // Write current prop positions into trail slot
+  for(let i=0;i<N_FPV_PROP;i++){
+    const arm=propMeta[i*4]|0, rad=propMeta[i*4+1], yOff=propMeta[i*4+2], ph0=propMeta[i*4+3];
+    const [sx,sz]=FPV_SIGNS[arm];
+    const ang=propAngle[arm]*PROP_DIR[arm]+ph0;
+    const wx=fpC.x+sx*A_FPV*.72+Math.cos(ang)*rad;
+    const wy=fpC.y+0.5+yOff;
+    const wz=fpC.z+sz*A_FPV*.72+Math.sin(ang)*rad;
+
+    // Trail buffer write
+    const tIdx=(trailHead*N_FPV_PROP+i)*3;
+    trailBuf[tIdx]=wx; trailBuf[tIdx+1]=wy; trailBuf[tIdx+2]=wz;
+
+    // Update curPos for prop particle
+    const gi=N_SH+N_FPV_BODY+i;
+    if(propsOn){ curPos[gi*3]=wx; curPos[gi*3+1]=wy; curPos[gi*3+2]=wz; }
+  }
+  trailHead=(trailHead+1)%TRAIL_SLOTS;
+
+  // ── COLORS: SHAHED + FPV BODY ───────────────────────────────
+  const isExpl = phase===3||phase===4;
+  // phase3: 0→1 = explosion burst (red→orange)
+  // phase4: 0→1 = ash fall (orange→grey, drift down)
+  const xb3 = phase===3 ? Math.min(phaseT/DUR[3], 1) : (phase===4 ? 1 : 0);
+  const xb4 = phase===4 ? Math.min(phaseT/DUR[4], 1) : 0;
+
+  for(let i=0;i<N_SH+N_FPV_BODY;i++){
+    let r,g,b;
+    if(i<N_SH){
+      const fi=i/N_SH;
+      if(fi>0.94){
+        r=1.0; g=0.55+Math.sin(t*7+i)*.12; b=0.05;
+      } else if(fi>0.85){
+        r=0.90; g=0.22; b=0.02;
+      } else if(fi>0.73){
+        r=0.70; g=0.06; b=0.06;
+      } else if(fi<0.56){
+        const spanFrac=Math.min(Math.abs(shRest[i*3+2])/38,1);
+        r=lerp(0.32,0.95,spanFrac); g=lerp(0.02,0.08,spanFrac); b=lerp(0.02,0.05,spanFrac);
+      } else {
+        r=0.42; g=0.04; b=0.04;
+      }
+    } else {
+      const fi=(i-N_SH)/N_FPV_BODY;
+      const isMotor=fi>0.38&&fi<0.66;
+      r=0.04; g=isMotor?0.52+Math.sin(t*9+i*.3)*.06:0.30; b=0.10;
+    }
+
+    if(isExpl){
+      // Stage 1 (phase3): base → red flash → orange
+      const burst = Math.min(xb3*3,1);          // quick red flash
+      const settle= Math.max(0,xb3*1.5-0.5);   // then settles orange
+      const noise = Math.random()*.08;
+
+      // red-orange intermediate
+      const ro_r = lerp(0.95, 1.0,  settle);
+      const ro_g = lerp(0.05, 0.42, settle) + noise;
+      const ro_b = lerp(0.00, 0.01, settle);
+
+      r = lerp(r, ro_r, burst);
+      g = lerp(g, ro_g, burst);
+      b = lerp(b, ro_b, burst);
+
+      // Stage 2 (phase4): orange → grey ash, brightness fades
+      if(xb4>0){
+        const ash  = eio(xb4);                  // smooth ash transition
+        const grey = lerp(0.40, 0.18, xb4);    // gets darker as it falls
+        const fade = 1.0 - xb4*0.55;           // overall dim
+        r = lerp(r, grey,        ash) * fade;
+        g = lerp(g, grey*0.92,   ash) * fade;
+        b = lerp(b, grey*0.88,   ash) * fade;
+      }
+    }
+    main.pa[i*3]=curPos[i*3]; main.pa[i*3+1]=curPos[i*3+1]; main.pa[i*3+2]=curPos[i*3+2];
+    glow.pa[i*3]=curPos[i*3]; glow.pa[i*3+1]=curPos[i*3+1]; glow.pa[i*3+2]=curPos[i*3+2];
+    main.ca[i*3]=r; main.ca[i*3+1]=g; main.ca[i*3+2]=b;
+    glow.ca[i*3]=r; glow.ca[i*3+1]=g; glow.ca[i*3+2]=b;
+  }
+
+  // ── COLORS: PROPS + TRAIL ───────────────────────────────────
+  for(let i=0;i<N_FPV_PROP;i++){
+    const gi=N_SH+N_FPV_BODY+i;
+    const bright=propsOn?(0.42+0.15*Math.sin(propAngle[propMeta[i*4]|0]+i)):0;
+    main.pa[gi*3]=curPos[gi*3]; main.pa[gi*3+1]=curPos[gi*3+1]; main.pa[gi*3+2]=curPos[gi*3+2];
+    main.ca[gi*3]=0.04; main.ca[gi*3+1]=bright; main.ca[gi*3+2]=0.10;
+    glow.pa[gi*3]=curPos[gi*3]; glow.pa[gi*3+1]=curPos[gi*3+1]; glow.pa[gi*3+2]=curPos[gi*3+2];
+    glow.ca[gi*3]=0.03; glow.ca[gi*3+1]=bright*.5; glow.ca[gi*3+2]=0.08;
+  }
+
+  // Trail: each slot gets fading alpha
+  for(let slot=0;slot<TRAIL_SLOTS;slot++){
+    const age=1-((trailHead-slot+TRAIL_SLOTS)%TRAIL_SLOTS)/(TRAIL_SLOTS-1);
+    const alpha=age*age*0.5*(propsOn?1:0);
+    for(let i=0;i<N_FPV_PROP;i++){
+      const si=(slot*N_FPV_PROP+i)*3;
+      const ti=((slot*N_FPV_PROP)+i)*3;
+      trail.pa[si]=trailBuf[ti]; trail.pa[si+1]=trailBuf[ti+1]; trail.pa[si+2]=trailBuf[ti+2];
+      trail.ca[si]=0.04; trail.ca[si+1]=alpha*0.7; trail.ca[si+2]=alpha*0.15;
+    }
+  }
+
+  main.g.attributes.position.needsUpdate=true;  main.g.attributes.color.needsUpdate=true;
+  glow.g.attributes.position.needsUpdate=true;  glow.g.attributes.color.needsUpdate=true;
+  trail.g.attributes.position.needsUpdate=true; trail.g.attributes.color.needsUpdate=true;
+
+  // ── WIND STREAKS ────────────────────────────────────────────
+  // Active from phase 1 onward (not exploding)
+  const windOn=phase>=1&&phase<3||phase===5;
+  const wMult=phase===2?Math.min(1.0+phaseT*.12,2.0):0.6;
+
+  for(let i=0;i<N_WSH;i++){
+    const o=i*7;
+    if(windOn){
+      wshData[o+6]-=dt; // life countdown
+      if(wshData[o+6]<=0){ spawnSHStreak(wshData,i); wshLife0[i]=wshData[o+6]; }
+      // move
+      wshData[o]  +=wshData[o+3]*dt*wMult;
+      wshData[o+1]+=wshData[o+4]*dt*wMult;
+      wshData[o+2]+=wshData[o+5]*dt*wMult;
+      // curl vy toward shC.y
+      wshData[o+4]+=(shC.y-wshData[o+1])*.5*dt;
+    }
+    const lifeMax=wshLife0[i]>0?wshLife0[i]:0.35;
+    const alive=windOn ? Math.max(0,wshData[o+6]/lifeMax) : 0;
+    wsh.pa[i*3]=wshData[o]; wsh.pa[i*3+1]=wshData[o+1]; wsh.pa[i*3+2]=wshData[o+2];
+    wsh.ca[i*3]=alive; wsh.ca[i*3+1]=alive; wsh.ca[i*3+2]=alive;
+  }
+
+  for(let i=0;i<N_WFPV;i++){
+    const o=i*7;
+    if(windOn){
+      wfpvData[o+6]-=dt;
+      if(wfpvData[o+6]<=0){ spawnFPVStreak(wfpvData,i); wfpvLife0[i]=wfpvData[o+6]; }
+      wfpvData[o]  +=wfpvData[o+3]*dt*wMult;
+      wfpvData[o+1]+=wfpvData[o+4]*dt*wMult;
+      wfpvData[o+2]+=wfpvData[o+5]*dt*wMult;
+    }
+    const lifeMax=wfpvLife0[i]>0?wfpvLife0[i]:0.22;
+    const alive=windOn ? Math.max(0,wfpvData[o+6]/lifeMax) : 0;
+    wfpv.pa[i*3]=wfpvData[o]; wfpv.pa[i*3+1]=wfpvData[o+1]; wfpv.pa[i*3+2]=wfpvData[o+2];
+    wfpv.ca[i*3]=alive; wfpv.ca[i*3+1]=alive; wfpv.ca[i*3+2]=alive;
+  }
+
+  wsh.g.attributes.position.needsUpdate=true;  wsh.g.attributes.color.needsUpdate=true;
+  wfpv.g.attributes.position.needsUpdate=true; wfpv.g.attributes.color.needsUpdate=true;
+
+  // ── CAMERA ─────────────────────────────────────────────────
+  if(!isDrag) autoR+=.003;
+  camLook.lerp(camTarget,.045);
+  const ry=autoR+orbY, rx=orbX;
+  camera.position.set(
+    camLook.x+camDist*Math.sin(ry)*Math.cos(rx),
+    camLook.y+camDist*Math.sin(rx),
+    camLook.z+camDist*Math.cos(ry)*Math.cos(rx)
+  );
+  camera.lookAt(camLook);
+  renderer.render(scene, camera);
+
+  // ── TARGET RETICLE OVERLAY ─────────────────────────────────
+  // Project shahed center to screen
+  if(reticleAlpha>0){
+    const p=project(shC.x, shC.y, shC.z);
+    if(p.z<1){
+      reticleX+=(p.x-reticleX)*.12;
+      reticleY+=(p.y-reticleY)*.12;
+    }
+  }
+  drawTargetUI(t);
+}
+
+animate();
+
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  resizeOverlay();
+});
+</script>
+</body>
+</html>

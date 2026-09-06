@@ -1,0 +1,1092 @@
+<!DOCTYPE html>
+<html lang="uk">
+<!--
+  ═══════════════════════════════════════════════════════════════════
+  FPV // INTERCEPT — annotated study copy
+  ═══════════════════════════════════════════════════════════════════
+
+  WHAT THIS FILE IS
+  A self-contained Three.js "particle morph" animation. There are no
+  3D models — every visible object is a cloud of points (particles).
+  Two "objects" exist:
+    1. A Shahed-136 drone silhouette  (10,000 particles)
+    2. An FPV quadcopter              ( 1,500 particles)
+  The FPV chases the Shahed, hits it, everything explodes into ash,
+  then the particles re-assemble and the loop repeats forever.
+
+  HOW IT'S BUILT (the big picture)
+  - THE TRICK: each particle has a "rest position" describing where it
+    sits inside its shape (wing, fuselage, prop...). Every frame, each
+    particle is nudged a small fraction of the way toward
+    (rest position + current center of its object). This "lerp toward
+    target" makes shapes assemble smoothly and lets you move a whole
+    object just by moving its center point.
+  - A STATE MACHINE (variable `phase`, 0..5) drives the story:
+      0 INITIALIZING  particles fly in from random positions
+      1 MONITORING    Shahed hovers, reticle scans it
+      2 INTERCEPTING  FPV accelerates toward the Shahed
+      3 IMPACT        explosion: particles get radial velocities
+      4 DESTROYED     ash: gravity pulls debris down, colors go grey
+      5 REBUILDING    shapes re-assemble → back to phase 1
+  - RENDERING LAYERS: the same particle positions are drawn multiple
+    times — a sharp "core" layer, a big soft "glow" layer, plus
+    separate layers for propeller motion-trails and wind streaks.
+    Additive blending makes overlapping particles glow brighter.
+  - 2D OVERLAY: a second <canvas> on top of the WebGL canvas draws
+    the targeting reticle with plain 2D canvas commands. The Shahed's
+    3D position is projected to 2D screen coordinates each frame.
+  - HUD: plain HTML divs, updated with a typewriter effect.
+
+  COORDINATES: Three.js default — X right, Y up, Z toward viewer.
+  The Shahed flies in +X; the FPV starts behind-left at (-55,-12,6).
+-->
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FPV // INTERCEPT (annotated)</title>
+<style>
+/* Reset + black fullscreen stage */
+* { margin:0; padding:0; box-sizing:border-box; }
+body { background:#000; overflow:hidden; font-family:'Courier New',monospace; }
+canvas { display:block; }
+
+/* The 2D overlay canvas sits exactly on top of the WebGL canvas.
+   pointer-events:none lets mouse/touch pass through to the 3D canvas. */
+#overlay {
+  position:absolute; top:0; left:0;
+  pointer-events:none;
+}
+
+/* ── GLASS STATS PANEL (frosted-glass card at the bottom) ── */
+#stats-panel {
+  position: absolute;
+  bottom: 5%;
+  left: 5%;
+  right: 5%;
+  background: rgba(255,255,255,0.04);
+  backdrop-filter: blur(6px) saturate(1.2);      /* the "glass" blur */
+  -webkit-backdrop-filter: blur(6px) saturate(1.2);
+  border: 1px solid rgba(255,255,255,0.12);
+  border-top: 1px solid rgba(255,255,255,0.22);  /* brighter top edge = fake light */
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+  border-radius: 16px;
+  padding: 16px 40px 14px;
+  box-shadow:
+    inset 0 1px 0 rgba(255,255,255,0.10),
+    inset 0 0 40px rgba(255,255,255,0.02),
+    0 4px 24px rgba(0,0,0,0.08);
+  font-size: 22px;
+  letter-spacing: 0.5px;
+  line-height: 1;
+  text-align: center;
+  user-select: none;
+  pointer-events: none;
+}
+#stats-since {
+  font-size: 9px;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.50);
+  margin-bottom: 11px;
+}
+#stats-rows {
+  display: flex;
+  gap: 28px;
+  justify-content: center;
+  align-items: baseline;
+}
+.stat-item { display:flex; flex-direction:column; align-items:center; gap:5px; }
+.stat-val {
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+  color: rgba(255,255,255,0.92);
+  line-height: 1;
+}
+.stat-val.accent { color: rgba(255,255,255,0.95); }
+.stat-label {
+  font-size: 8px;
+  letter-spacing: 2.5px;
+  text-transform: uppercase;
+  color: rgba(255,255,255,0.50);
+}
+.stat-sub {
+  font-size: 8.5px;
+  color: rgba(255,255,255,0.45);
+  margin-top: 1px;
+  letter-spacing: 0.4px;
+}
+.divider {
+  width: 1px; height: 30px;
+  background: rgba(255,255,255,0.10);
+  align-self: center;
+}
+
+/* ── HUD (status text top-left, flash message center, hint bottom-right) ── */
+#hud {
+  position:absolute; top:0; left:0; right:0; bottom:0;
+  pointer-events:none;
+}
+#status {
+  position:absolute; top:24px; left:28px;
+  color:rgba(0,210,255,0.55); font-size:10px;
+  letter-spacing:3px; line-height:2.1;
+}
+#flash {
+  position:absolute; top:50%; left:50%;
+  transform:translate(-50%,-50%);
+  font-size:clamp(13px,2.2vw,22px);
+  letter-spacing:8px; text-transform:uppercase;
+  text-align:center; opacity:0;
+  transition:opacity 0.25s;                 /* fade in/out via .on class */
+  text-shadow:0 0 28px currentColor;        /* glow in the text's own color */
+  white-space:nowrap;
+  pointer-events:none;
+}
+#flash.on { opacity:1; }
+#corner {
+  position:absolute; bottom:22px; right:24px;
+  color:rgba(255,255,255,0.13); font-size:9px; letter-spacing:3px;
+}
+</style>
+</head>
+<body>
+<!-- WebGL canvas (3D scene) + 2D overlay canvas (reticle) stacked on top -->
+<canvas id="c"></canvas>
+<canvas id="overlay"></canvas>
+
+<!-- Glass Stats Panel — static demo numbers, not wired to any logic -->
+<div id="stats-panel">
+  <div id="stats-since">Since your last visit</div>
+  <div id="stats-rows">
+    <div class="stat-item">
+      <div class="stat-val accent" id="val-destroyed">3</div>
+      <div class="stat-label">Destroyed</div>
+      <div class="stat-sub">Shaheds neutralized</div>
+    </div>
+    <div class="divider"></div>
+    <div class="stat-item">
+      <div class="stat-val accent" id="val-impact">1</div>
+      <div class="stat-label">Your impact</div>
+      <div class="stat-sub">15% of your donation</div>
+    </div>
+  </div>
+</div>
+
+<div id="hud">
+  <div id="status">
+    <div id="statusLine1"></div> <!-- phase label, typed out char by char -->
+    <div id="statusLine2" style="opacity:.45">TARGET: SHAHED-136</div>
+    <div id="statusLine3" style="opacity:.45">SPD: —</div> <!-- FPV speed readout -->
+  </div>
+  <div id="flash"></div>
+  <div id="corner">DRAG · SCROLL</div>
+</div>
+
+<!-- Import map: lets `import * as THREE from 'three'` resolve to a CDN URL.
+     No bundler, no npm — the browser fetches the library directly. -->
+<script type="importmap">
+{"imports":{"three":"https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.module.js"}}
+</script>
+<script type="module">
+import * as THREE from 'three';
+
+// ═══════════════════════════════════════════════════
+// CONSTANTS — particle counts and FPV drone geometry
+// ═══════════════════════════════════════════════════
+const SHAHED_COUNT    = 10000;                       // particles forming the Shahed
+const FPV_COUNT       = 1500;                        // particles forming the FPV drone
+const TOTAL_COUNT     = SHAHED_COUNT + FPV_COUNT;    // both share one big buffer
+const FPV_BODY_COUNT  = 600;                         // static part: arms, motors, frame
+const FPV_PROP_COUNT  = FPV_COUNT - FPV_BODY_COUNT;  // 900: rotating propeller particles
+const PARTICLES_PER_PROP = Math.floor(FPV_PROP_COUNT / 4); // 4 props on a quad
+
+const FPV_ARM_LENGTH  = 7.5;                         // half-size of the quad frame
+// The 4 arm directions of an X-frame quad: (+x+z, +x-z, -x+z, -x-z)
+const ARM_DIAGONALS   = [[1,1],[1,-1],[-1,1],[-1,-1]];
+const PROP_SPIN_DIR   = [1,-1,1,-1];                 // alternate spin like a real quad
+const PROP_SPIN_SPEED = [8.5,9.1,8.8,9.3];           // slightly different rad/s per motor
+                                                     // (avoids a fake "everything in sync" look)
+
+// ═══════════════════════════════════════════════════
+// RENDERER / SCENE / CAMERA
+// ═══════════════════════════════════════════════════
+const canvas   = document.getElementById('c');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias:true });
+renderer.setSize(innerWidth, innerHeight);
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); // cap DPI: phones stay fast
+renderer.toneMapping = THREE.ACESFilmicToneMapping;    // filmic color response
+renderer.toneMappingExposure = 1.1;
+
+const scene = new THREE.Scene();
+scene.fog = new THREE.FogExp2(0x000008, 0.0045);       // distant particles fade to near-black
+const camera = new THREE.PerspectiveCamera(50, innerWidth/innerHeight, 0.1, 2000);
+
+// ═══════════════════════════════════════════════════
+// HELPERS
+// ═══════════════════════════════════════════════════
+// Easing curves (t goes 0→1, output goes 0→1 with a nicer acceleration profile)
+const easeInOutCubic = t => t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+const easeOutQuad    = t => 1-(1-t)*(1-t);
+const lerp = (a,b,t) => a+(b-a)*t;   // linear interpolation: a at t=0, b at t=1
+
+// Creates one particle layer: a Points object with per-particle position
+// and color arrays we mutate every frame (CPU-side particle system).
+// Additive blending = overlapping particles add up and glow.
+// depthWrite:false = transparent particles don't occlude each other wrongly.
+function createParticleLayer(count, pointSize, opacity) {
+  const positions = new Float32Array(count*3);   // x,y,z per particle
+  const colors    = new Float32Array(count*3);   // r,g,b per particle
+  const geometry  = new THREE.BufferGeometry();
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  geometry.setAttribute('color',    new THREE.BufferAttribute(colors, 3));
+  const material = new THREE.PointsMaterial({
+    size:pointSize, vertexColors:true, transparent:true, opacity,
+    blending:THREE.AdditiveBlending, depthWrite:false, sizeAttenuation:true
+  });
+  scene.add(new THREE.Points(geometry, material));
+  return { positions, colors, geometry };
+}
+
+// ═══════════════════════════════════════════════════
+// PARTICLE LAYERS
+// Same particle data drawn twice at different sizes = cheap glow:
+//   core  = small bright dots, glow = huge faint dots behind them.
+// ═══════════════════════════════════════════════════
+const coreLayer  = createParticleLayer(TOTAL_COUNT, 0.50, 1.00);  // shahed + fpv body + props
+const glowLayer  = createParticleLayer(TOTAL_COUNT, 3.00, 0.055); // soft halo copy
+const trailLayer = createParticleLayer(FPV_PROP_COUNT * 6, 0.85, 0.40); // prop motion trails
+
+// Wind streak layers — short-lived particles streaming off both aircraft
+const WIND_SHAHED_COUNT = 2100, WIND_FPV_COUNT = 1050;
+const shahedWindLayer = createParticleLayer(WIND_SHAHED_COUNT, 0.50, 0.60);
+const fpvWindLayer    = createParticleLayer(WIND_FPV_COUNT,    0.42, 0.55);
+
+// ═══════════════════════════════════════════════════
+// PHYSICS BUFFERS (simulation state, separate from render buffers)
+// ═══════════════════════════════════════════════════
+const particlePos  = new Float32Array(TOTAL_COUNT*3); // where each particle IS right now
+const explosionVel = new Float32Array(TOTAL_COUNT*3); // per-particle velocity, used in phases 3-4
+
+// Start every particle at a random spot in a 200-unit cube,
+// so phase 0 looks like the shapes condensing out of chaos.
+for (let i=0;i<TOTAL_COUNT;i++) {
+  particlePos[i*3]  =(Math.random()-.5)*200;
+  particlePos[i*3+1]=(Math.random()-.5)*200;
+  particlePos[i*3+2]=(Math.random()-.5)*200;
+}
+
+// ═══════════════════════════════════════════════════
+// SHAPE BUILDERS
+// These generate "rest positions": where each particle sits inside its
+// shape, relative to the shape's center. Random numbers decide which
+// body part a particle belongs to, weighted by how many particles each
+// part should get.
+// ═══════════════════════════════════════════════════
+function buildShahedShape() {
+  const out = new Float32Array(SHAHED_COUNT*3);
+  const WINGSPAN=38, LENGTH=28;
+  for (let i=0;i<SHAHED_COUNT;i++) {
+    const part=Math.random(); let x=0,y=0,z=0;
+    if (part<0.56) {
+      // 56% — DELTA WING: pick a side and a span position, then a random
+      // point between the swept leading edge and the trailing edge.
+      const side=Math.random()<.5?1:-1, span=Math.random(); // span: 0=root, 1=tip
+      const xLeadingEdge =LENGTH*.55-span*(LENGTH*.55+LENGTH*.45); // sweeps back toward tip
+      const xTrailingEdge=-LENGTH*.45+span*LENGTH*.08;
+      x=xTrailingEdge+Math.random()*(xLeadingEdge-xTrailingEdge);
+      z=side*span*WINGSPAN;
+      y=(Math.random()-.5)*(0.5+span*0.3); // wing gets slightly thicker toward tip
+    } else if (part<0.74) {
+      // 18% — FUSELAGE: a tube whose radius bulges in the middle
+      const fx=(Math.random()-.5)*LENGTH*.85, ang=Math.random()*Math.PI*2;
+      const frac=(fx+LENGTH*.425)/(LENGTH*.85);          // 0=tail, 1=nose
+      const radius=0.8+frac*(2.5-0.8)*Math.sin(frac*Math.PI); // sin() = bulge
+      x=fx; y=Math.cos(ang)*radius; z=Math.sin(ang)*radius*.75; // slightly flattened
+    } else if (part<0.86) {
+      // 12% — VERTICAL TAIL FIN
+      x=-(LENGTH*.22+Math.random()*LENGTH*.22);
+      y=1.8+Math.random()*WINGSPAN*.26;
+      z=(Math.random()-.5)*.7;
+    } else if (part<0.95) {
+      // 9% — ENGINE RING at the rear
+      const ang=Math.random()*Math.PI*2, radius=1.0+Math.random()*1.6;
+      x=-(LENGTH*.42+Math.random()*LENGTH*.06);
+      y=0.5+Math.cos(ang)*radius; z=Math.sin(ang)*radius*.9;
+    } else {
+      // 5% — EXHAUST / PROP DISK at the very tail (colored hot later)
+      const ang=Math.random()*Math.PI*2, radius=Math.random()*1.2;
+      x=-LENGTH*.50; y=0.5+Math.cos(ang)*radius*.6; z=Math.sin(ang)*radius*.6;
+    }
+    out[i*3]=x; out[i*3+1]=y; out[i*3+2]=z;
+  }
+  return out;
+}
+
+function buildFpvBodyShape() {
+  const out = new Float32Array(FPV_BODY_COUNT*3);
+  for (let i=0;i<FPV_BODY_COUNT;i++) {
+    const part=Math.random(); let x=0,y=0,z=0;
+    if (part<0.38) {
+      // 38% — the 4 diagonal ARMS: points along a line from center outward
+      const [sx,sz]=ARM_DIAGONALS[Math.floor(Math.random()*4)], t=Math.random();
+      x=sx*t*FPV_ARM_LENGTH*.72+(Math.random()-.5)*.18;
+      y=(Math.random()-.5)*.28;
+      z=sz*t*FPV_ARM_LENGTH*.72+(Math.random()-.5)*.18;
+    } else if (part<0.66) {
+      // 28% — MOTOR CYLINDERS at each arm tip
+      const [sx,sz]=ARM_DIAGONALS[Math.floor(Math.random()*4)];
+      const ang=Math.random()*Math.PI*2, radius=0.3+Math.random()*.8;
+      x=sx*FPV_ARM_LENGTH*.72+Math.cos(ang)*radius;
+      y=(Math.random()-.5)*1.1;
+      z=sz*FPV_ARM_LENGTH*.72+Math.sin(ang)*radius;
+    } else if (part<0.88) {
+      // 22% — CENTER FRAME / battery box
+      x=(Math.random()-.5)*FPV_ARM_LENGTH*.40;
+      y=(Math.random()-.5)*1.2;
+      z=(Math.random()-.5)*FPV_ARM_LENGTH*.34;
+    } else {
+      // 12% — CAMERA pod at the front
+      x=FPV_ARM_LENGTH*.24+Math.random()*FPV_ARM_LENGTH*.10;
+      y=-0.3+(Math.random()-.5)*.5;
+      z=(Math.random()-.5)*.85;
+    }
+    out[i*3]=x; out[i*3+1]=y; out[i*3+2]=z;
+  }
+  return out;
+}
+
+// Propeller particle metadata: [which arm 0-3, radius from motor, small
+// vertical jitter, starting angle]. Props are NOT stored as rest shapes —
+// their positions are computed fresh each frame from these + spin angle.
+const propMeta = new Float32Array(FPV_PROP_COUNT*4);
+for (let i=0;i<FPV_PROP_COUNT;i++) {
+  propMeta[i*4]  =Math.floor(i/PARTICLES_PER_PROP)%4;  // arm index
+  propMeta[i*4+1]=1.3+Math.random()*2.1;               // radius (blade length spread)
+  propMeta[i*4+2]=(Math.random()-.5)*.08;              // y jitter (blade thickness)
+  propMeta[i*4+3]=Math.random()*Math.PI*2;             // phase offset around the disk
+}
+
+const shahedShape  = buildShahedShape();   // rest positions, built once
+const fpvBodyShape = buildFpvBodyShape();
+
+// ═══════════════════════════════════════════════════
+// OBJECT CENTERS — move these, and the whole particle
+// shape follows (via the lerp-toward-target trick)
+// ═══════════════════════════════════════════════════
+const shahedCenter = new THREE.Vector3(0,0,0);
+const fpvCenter    = new THREE.Vector3(-55,-12,6);       // starts behind-left-below
+const fpvVelocity  = new THREE.Vector3(0.3,0.08,-0.04);  // per-frame velocity in phase 2
+
+// Target buffers = rest shape + current center, recomputed when centers move
+const shahedTarget  = new Float32Array(SHAHED_COUNT*3);
+const fpvBodyTarget = new Float32Array(FPV_BODY_COUNT*3);
+
+function updateShahedTargets(){
+  for(let i=0;i<SHAHED_COUNT;i++){
+    shahedTarget[i*3]  =shahedShape[i*3]  +shahedCenter.x;
+    shahedTarget[i*3+1]=shahedShape[i*3+1]+shahedCenter.y;
+    shahedTarget[i*3+2]=shahedShape[i*3+2]+shahedCenter.z;
+  }
+}
+function updateFpvBodyTargets(){
+  for(let i=0;i<FPV_BODY_COUNT;i++){
+    fpvBodyTarget[i*3]  =fpvBodyShape[i*3]  +fpvCenter.x;
+    fpvBodyTarget[i*3+1]=fpvBodyShape[i*3+1]+fpvCenter.y;
+    fpvBodyTarget[i*3+2]=fpvBodyShape[i*3+2]+fpvCenter.z;
+  }
+}
+updateShahedTargets(); updateFpvBodyTargets();
+
+// Camera aims at the midpoint between the two aircraft (smoothed)
+const camLookCurrent = new THREE.Vector3(0,0,0);
+const camLookTarget  = new THREE.Vector3(0,0,0);
+
+// ═══════════════════════════════════════════════════
+// WIND STREAK SYSTEM
+// Classic emitter pattern: each streak = position + velocity + remaining
+// life, packed 7 floats per streak. When life hits 0 it respawns at the
+// aircraft — so the pool is fixed-size and always fully in use.
+// ═══════════════════════════════════════════════════
+const shahedWindData = new Float32Array(WIND_SHAHED_COUNT * 7); // x,y,z, vx,vy,vz, life
+const fpvWindData    = new Float32Array(WIND_FPV_COUNT * 7);
+
+// Spawn a streak at the Shahed's wing leading edge, flying backward (-X)
+function spawnShahedStreak(buf, i) {
+  const o = i*7;
+  const WINGSPAN=38, LENGTH=28;
+  const span=Math.random(), side=Math.random()<.5?1:-1;
+  const xLeadingEdge = LENGTH*.55 - span*(LENGTH*.55+LENGTH*.45);
+  buf[o]   = shahedCenter.x + xLeadingEdge + (Math.random()-.5)*4;
+  buf[o+1] = shahedCenter.y + (Math.random()-.5)*2;
+  buf[o+2] = shahedCenter.z + side*span*WINGSPAN*(0.6+Math.random()*.4);
+  const speed = 20+Math.random()*14;
+  buf[o+3] = -speed;                     // stream backward
+  buf[o+4] = (Math.random()-.5)*2;
+  buf[o+5] = -side*Math.random()*3;      // curl slightly inward
+  buf[o+6] = 0.20+Math.random()*.30;     // life in seconds
+}
+
+// Spawn a streak around the FPV, also streaming backward
+function spawnFpvStreak(buf, i) {
+  const o = i*7;
+  buf[o]   = fpvCenter.x + (Math.random()-.5)*4;
+  buf[o+1] = fpvCenter.y + (Math.random()-.5)*2.5;
+  buf[o+2] = fpvCenter.z + (Math.random()-.5)*4;
+  const speed = 25+Math.random()*18;
+  buf[o+3] = -speed*(0.85+Math.random()*.15);
+  buf[o+4] = (Math.random()-.5)*5;
+  buf[o+5] = (Math.random()-.5)*5;
+  buf[o+6] = 0.15+Math.random()*.20;
+}
+
+// Initialize all streaks, then scale each life by a random factor so the
+// pool is desynchronized (they don't all die/respawn on the same frame).
+for (let i=0;i<WIND_SHAHED_COUNT; i++) { spawnShahedStreak(shahedWindData, i); shahedWindData[i*7+6] *= Math.random(); }
+for (let i=0;i<WIND_FPV_COUNT;    i++) { spawnFpvStreak(fpvWindData,i);        fpvWindData[i*7+6]    *= Math.random(); }
+
+// Each streak's max life is stored separately so we can compute
+// brightness = remainingLife / maxLife (a 1→0 fade).
+const shahedWindMaxLife = new Float32Array(WIND_SHAHED_COUNT);
+const fpvWindMaxLife    = new Float32Array(WIND_FPV_COUNT);
+for (let i=0;i<WIND_SHAHED_COUNT; i++) shahedWindMaxLife[i] = 0.20+Math.random()*.30;
+for (let i=0;i<WIND_FPV_COUNT;    i++) fpvWindMaxLife[i]    = 0.15+Math.random()*.20;
+
+// ═══════════════════════════════════════════════════
+// PROPELLER TRAIL — ring buffer of the last 6 frames of prop positions.
+// Older slots are drawn dimmer → motion-blur look on the spinning blades.
+// ═══════════════════════════════════════════════════
+const TRAIL_SLOTS = 6;
+const trailPositions = new Float32Array(FPV_PROP_COUNT * TRAIL_SLOTS * 3);
+let   trailHead = 0;                 // which slot gets overwritten this frame
+const propAngle = [0,0,0,0];         // current rotation angle of each of the 4 props
+
+// ═══════════════════════════════════════════════════
+// OVERLAY CANVAS — the 2D targeting reticle is drawn here,
+// on top of the WebGL scene, using plain canvas 2D calls.
+// ═══════════════════════════════════════════════════
+const overlayCanvas = document.getElementById('overlay');
+const overlayCtx    = overlayCanvas.getContext('2d');
+function resizeOverlay(){
+  overlayCanvas.width  = innerWidth;
+  overlayCanvas.height = innerHeight;
+}
+resizeOverlay();
+
+// ═══════════════════════════════════════════════════
+// STATE MACHINE
+// PHASE_DURATION[phase] = how long each phase lasts, in seconds.
+// Phase 2 (intercept) is 999 = "until the FPV actually reaches the
+// target" — it exits on distance, not on a timer.
+// ═══════════════════════════════════════════════════
+const PHASE_DURATION=[3.2, 2.2, 999, 2.2, 3.5, 3.2];
+let phase=0, phaseTime=0;   // phaseTime resets to 0 on every phase change
+
+// ═══════════════════════════════════════════════════
+// TYPEWRITER HUD — status line types itself out char by char
+// ═══════════════════════════════════════════════════
+const statusLine1 = document.getElementById('statusLine1');
+const statusLine3 = document.getElementById('statusLine3');
+const flashEl     = document.getElementById('flash');
+let flashCountdown=0;   // seconds until the center flash message fades out
+
+let typewriterTarget='', typewriterCurrent='', typewriterTimer=0;
+const TYPEWRITER_SPEED=0.045; // seconds per character
+
+function setStatus(txt){
+  typewriterTarget  = txt;
+  typewriterCurrent = '';
+  typewriterTimer   = 0;
+}
+
+function tickTypewriter(dt){
+  if(typewriterCurrent===typewriterTarget) return;
+  typewriterTimer+=dt;
+  const chars=Math.min(Math.floor(typewriterTimer/TYPEWRITER_SPEED), typewriterTarget.length);
+  typewriterCurrent=typewriterTarget.slice(0,chars);
+  // show a block cursor while still typing
+  statusLine1.textContent = typewriterCurrent + (typewriterCurrent.length<typewriterTarget.length ? '█' : '');
+}
+
+// Big center-screen announcement ("TARGET ACQUIRED" etc.),
+// also typed out, visible for flashCountdown seconds.
+function flash(txt,color){
+  flashEl.textContent='';
+  flashEl.style.color=color||'#fff';
+  flashEl.classList.add('on');
+  flashCountdown=2.5;
+  let fi=0;
+  const iv=setInterval(()=>{
+    fi++;
+    flashEl.textContent=txt.slice(0,fi);
+    if(fi>=txt.length) clearInterval(iv);
+  },30);
+}
+
+// Status label for each phase
+const PHASE_LABEL=[
+  '// INITIALIZING',
+  '// MONITORING',
+  '// INTERCEPTING',
+  '// IMPACT',
+  '// DESTROYED',
+  '// REBUILDING',
+];
+
+// ═══════════════════════════════════════════════════
+// TARGET RETICLE STATE
+// ═══════════════════════════════════════════════════
+let reticleAlpha  = 0;      // 0=hidden, 1=fully visible (fades in/out)
+let reticleLocked = false;  // false=cyan "scanning", true=red "locked"
+let reticlePulse  = 0;      // 0→1 expanding ring animation after lock
+let reticleX      = 0;      // screen position (smoothed, so it lags
+let reticleY      = 0;      //   slightly behind the target — feels analog)
+let scanAngle     = 0;      // drives the rotating dashed scan ring
+
+// Project a 3D world point into 2D screen pixels (for the overlay).
+// v.project() maps to normalized device coords (-1..1), then we scale
+// to pixels. Returned z<1 means the point is in front of the camera.
+function projectToScreen(wx,wy,wz){
+  const v=new THREE.Vector3(wx,wy,wz);
+  v.project(camera);
+  return {
+    x: (v.x*.5+.5)*innerWidth,
+    y: (-.5*v.y+.5)*innerHeight,
+    z: v.z
+  };
+}
+
+// Draw the full reticle: corner brackets, center cross, scan ring
+// (while tracking) or pulse ring (when locked), text labels, distance.
+function drawTargetUI(t){
+  overlayCtx.clearRect(0,0,overlayCanvas.width,overlayCanvas.height);
+  if(reticleAlpha<=0) return;
+
+  const cx=reticleX, cy=reticleY;
+  const a=reticleAlpha;
+  const locked=reticleLocked;
+  const size= locked ? 42 : 55;   // reticle tightens when locked
+  const cornerLen=12;
+  const color   = locked ? `rgba(255,60,40,${a})`    : `rgba(0,210,255,${a})`;
+  const colorDim= locked ? `rgba(255,60,40,${a*.35})`: `rgba(0,210,255,${a*.3})`;
+
+  overlayCtx.save();
+  overlayCtx.strokeStyle=color;
+  overlayCtx.lineWidth=1.5;
+
+  // ── Corner brackets (4 L-shapes) ──
+  const corners=[[1,1],[-1,1],[1,-1],[-1,-1]];
+  corners.forEach(([sx,sy])=>{
+    overlayCtx.beginPath();
+    overlayCtx.moveTo(cx+sx*size,             cy+sy*(size-cornerLen));
+    overlayCtx.lineTo(cx+sx*size,             cy+sy*size);
+    overlayCtx.lineTo(cx+sx*(size-cornerLen), cy+sy*size);
+    overlayCtx.stroke();
+  });
+
+  // ── Center cross (tiny, with a gap in the middle) ──
+  overlayCtx.strokeStyle=color;
+  overlayCtx.lineWidth=1;
+  overlayCtx.beginPath();
+  overlayCtx.moveTo(cx-6,cy); overlayCtx.lineTo(cx-2,cy);
+  overlayCtx.moveTo(cx+2,cy); overlayCtx.lineTo(cx+6,cy);
+  overlayCtx.moveTo(cx,cy-6); overlayCtx.lineTo(cx,cy-2);
+  overlayCtx.moveTo(cx,cy+2); overlayCtx.lineTo(cx,cy+6);
+  overlayCtx.stroke();
+
+  // ── Rotating dashed scan ring (only while still tracking) ──
+  if(!locked){
+    overlayCtx.strokeStyle=colorDim;
+    overlayCtx.lineWidth=1;
+    overlayCtx.setLineDash([8,14]);
+    overlayCtx.lineDashOffset=-scanAngle*80;  // animates the dashes around
+    overlayCtx.beginPath();
+    overlayCtx.arc(cx,cy,size+8,0,Math.PI*2);
+    overlayCtx.stroke();
+    overlayCtx.setLineDash([]);
+  }
+
+  // ── Expanding pulse ring right after lock ──
+  if(locked){
+    const pulseRadius=size+6+reticlePulse*22;
+    const pulseAlpha=a*(1-reticlePulse);      // fades as it expands
+    overlayCtx.strokeStyle=`rgba(255,60,40,${pulseAlpha})`;
+    overlayCtx.lineWidth=1.5;
+    overlayCtx.beginPath();
+    overlayCtx.arc(cx,cy,pulseRadius,0,Math.PI*2);
+    overlayCtx.stroke();
+  }
+
+  // ── Text labels next to the reticle ──
+  overlayCtx.font=`9px 'Courier New'`;
+  overlayCtx.fillStyle=color;
+  overlayCtx.textAlign='left';
+
+  if(!locked){
+    overlayCtx.globalAlpha=a*.7;
+    overlayCtx.fillText('TRACKING',cx+size+8,cy-4);
+    overlayCtx.fillText('SHAHED-136',cx+size+8,cy+8);
+  } else {
+    overlayCtx.globalAlpha=a;
+    overlayCtx.fillText('LOCKED',cx+size+8,cy-4);
+    overlayCtx.fillText('SHAHED-136',cx+size+8,cy+8);
+    overlayCtx.fillStyle=`rgba(255,60,40,${a*.6})`;
+    overlayCtx.fillText('INTERCEPTING',cx+size+8,cy+20);
+  }
+
+  // ── Live distance readout below the reticle (intercept phase only) ──
+  if(phase===2){
+    const dx=shahedCenter.x-fpvCenter.x, dy=shahedCenter.y-fpvCenter.y, dz=shahedCenter.z-fpvCenter.z;
+    const d=(Math.sqrt(dx*dx+dy*dy+dz*dz)*2.5).toFixed(0); // *2.5 = fake "meters" scale
+    overlayCtx.fillStyle=color;
+    overlayCtx.textAlign='center';
+    overlayCtx.globalAlpha=a*.8;
+    overlayCtx.fillText(`${d}m`,cx,cy+size+18);
+  }
+
+  overlayCtx.restore();
+}
+
+// ═══════════════════════════════════════════════════
+// ORBIT CAMERA CONTROLS (hand-rolled, no OrbitControls import)
+// Drag = rotate around the scene; wheel = zoom; touch supported.
+// ═══════════════════════════════════════════════════
+let isDragging=false, lastPointerX=0, lastPointerY=0;
+let orbitYaw=0.2, orbitPitch=0.08;   // user-controlled angles (radians)
+let autoRotate=0;                    // slowly increases when not dragging
+let camDistance=130;                 // zoom (wheel changes this)
+
+canvas.addEventListener('mousedown',e=>{isDragging=true;lastPointerX=e.clientX;lastPointerY=e.clientY;});
+window.addEventListener('mouseup',()=>isDragging=false);
+window.addEventListener('mousemove',e=>{
+  if(!isDragging)return;
+  orbitYaw  +=(e.clientX-lastPointerX)*.007;
+  orbitPitch+=(e.clientY-lastPointerY)*.007;
+  orbitPitch=Math.max(-1.1,Math.min(1.1,orbitPitch)); // don't flip over the top
+  lastPointerX=e.clientX;lastPointerY=e.clientY;
+});
+canvas.addEventListener('wheel',e=>{camDistance=Math.max(40,Math.min(300,camDistance+e.deltaY*.18));},{passive:true});
+canvas.addEventListener('touchstart',e=>{isDragging=true;lastPointerX=e.touches[0].clientX;lastPointerY=e.touches[0].clientY;},{passive:true});
+window.addEventListener('touchend',()=>isDragging=false);
+window.addEventListener('touchmove',e=>{
+  if(!isDragging)return;
+  orbitYaw  +=(e.touches[0].clientX-lastPointerX)*.009;
+  orbitPitch+=(e.touches[0].clientY-lastPointerY)*.009;
+  lastPointerX=e.touches[0].clientX;lastPointerY=e.touches[0].clientY;
+},{passive:true});
+
+// ═══════════════════════════════════════════════════
+// MAIN LOOP — runs every frame via requestAnimationFrame.
+// Order each frame:
+//   1. timing + HUD ticks
+//   2. phase logic (moves centers, lerps particles, handles transitions)
+//   3. propeller spin + trail ring buffer
+//   4. recompute all particle COLORS
+//   5. wind streaks (move / kill / respawn)
+//   6. camera + render 3D
+//   7. reticle on the 2D overlay
+// ═══════════════════════════════════════════════════
+let lastFrameTime=performance.now();
+
+function animate(){
+  requestAnimationFrame(animate);
+  const now=performance.now();
+  // dt = seconds since last frame, capped at 0.05 so a lag spike
+  // (tab switch etc.) can't make the physics jump wildly
+  const dt=Math.min((now-lastFrameTime)*.001,.05);
+  lastFrameTime=now;
+  const t=now*.001;   // absolute time in seconds, used for sine wobbles
+
+  if(flashCountdown>0){flashCountdown-=dt;if(flashCountdown<=0)flashEl.classList.remove('on');}
+  phaseTime+=dt;
+  tickTypewriter(dt);
+  scanAngle+=dt*0.4;
+
+  // Camera aims at the midpoint between the two aircraft
+  camLookTarget.set(
+    (shahedCenter.x+fpvCenter.x)*.5,
+    (shahedCenter.y+fpvCenter.y)*.5+2,
+    (shahedCenter.z+fpvCenter.z)*.5
+  );
+
+  // ── PHASES ────────────────────────────────────────────────
+  // Common pattern inside each phase:
+  //   particlePos += (target - particlePos) * strength
+  // i.e. every frame each particle moves a fraction of the remaining
+  // distance to its target. Small strength = slow drift, large = snappy.
+
+  if (phase===0) {
+    // INITIALIZING — particles converge from random chaos into the shapes.
+    // Strength ramps 0→0.10 with easing, so assembly starts gentle.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[0]);
+    reticleAlpha=0;
+    const strength=easeInOutCubic(Math.min(phaseTime/PHASE_DURATION[0],1))*.10;
+    updateShahedTargets(); updateFpvBodyTargets();
+    for(let i=0;i<SHAHED_COUNT;i++){
+      particlePos[i*3]  +=(shahedTarget[i*3]  -particlePos[i*3])  *strength;
+      particlePos[i*3+1]+=(shahedTarget[i*3+1]-particlePos[i*3+1])*strength;
+      particlePos[i*3+2]+=(shahedTarget[i*3+2]-particlePos[i*3+2])*strength;
+    }
+    for(let i=0;i<FPV_BODY_COUNT;i++){
+      const gi=SHAHED_COUNT+i;  // global index into the shared buffer
+      particlePos[gi*3]  +=(fpvBodyTarget[i*3]  -particlePos[gi*3])  *strength;
+      particlePos[gi*3+1]+=(fpvBodyTarget[i*3+1]-particlePos[gi*3+1])*strength;
+      particlePos[gi*3+2]+=(fpvBodyTarget[i*3+2]-particlePos[gi*3+2])*strength;
+    }
+    if(phaseTime>=PHASE_DURATION[0]){phase=1;phaseTime=0;flash('TARGET ACQUIRED','#00d2ff');}
+  }
+
+  else if (phase===1) {
+    // MONITORING — Shahed hovers with a gentle multi-sine "breathing"
+    // wobble; reticle fades in and scans it.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[1]);
+    reticleAlpha=Math.min(reticleAlpha+dt*1.2,1);
+    reticleLocked=false;
+    reticlePulse=0;
+    const breathe=Math.sin(t*1.1)*.4;
+    updateShahedTargets(); updateFpvBodyTargets();
+    for(let i=0;i<SHAHED_COUNT;i++){
+      // per-particle phase offsets (i*.001 etc.) make the wobble ripple
+      // across the airframe instead of moving it as one rigid block
+      const tx=shahedTarget[i*3]  +Math.sin(t*.4 +i*.001 )*.3;
+      const ty=shahedTarget[i*3+1]+Math.cos(t*.35+i*.0013)*.25+breathe;
+      const tz=shahedTarget[i*3+2]+Math.sin(t*.28+i*.0008)*.22;
+      particlePos[i*3]  +=(tx-particlePos[i*3])  *.03;
+      particlePos[i*3+1]+=(ty-particlePos[i*3+1])*.03;
+      particlePos[i*3+2]+=(tz-particlePos[i*3+2])*.03;
+    }
+    for(let i=0;i<FPV_BODY_COUNT;i++){
+      const gi=SHAHED_COUNT+i;
+      particlePos[gi*3]  +=(fpvBodyTarget[i*3]  -particlePos[gi*3])  *.035;
+      particlePos[gi*3+1]+=(fpvBodyTarget[i*3+1]-particlePos[gi*3+1])*.035;
+      particlePos[gi*3+2]+=(fpvBodyTarget[i*3+2]-particlePos[gi*3+2])*.035;
+    }
+    if(phaseTime>=PHASE_DURATION[1]){phase=2;phaseTime=0;flash('INTERCEPT INITIATED','#ff8800');}
+  }
+
+  else if (phase===2) {
+    // INTERCEPTING — the actual chase. The Shahed cruises in +X with a
+    // slight weave; the FPV steers toward it (simple homing: accelerate
+    // along the direction to target, clamp max speed). Speed limit grows
+    // with time, so the FPV always closes the gap eventually.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[2]);
+    if(phaseTime>0.8&&!reticleLocked){   // lock the reticle 0.8s in
+      reticleLocked=true;
+      reticlePulse=0;
+    }
+    if(reticleLocked) reticlePulse=Math.min(reticlePulse+dt*.7,1);
+
+    // Shahed flight: forward + gentle sine weave
+    shahedCenter.x+=0.40+phaseTime*.03;
+    shahedCenter.y+=Math.sin(t*.5)*.04;
+    shahedCenter.z+=Math.cos(t*.3)*.025;
+
+    // FPV homing steering
+    const dx=shahedCenter.x-fpvCenter.x, dy=shahedCenter.y-fpvCenter.y, dz=shahedCenter.z-fpvCenter.z;
+    const dist=Math.sqrt(dx*dx+dy*dy+dz*dz);
+    const maxSpeed=Math.min(0.5+phaseTime*.22,5.0);   // ramps up over time
+    fpvVelocity.x+=(dx/dist)*.20;   // accelerate toward target
+    fpvVelocity.y+=(dy/dist)*.12;   // (weaker vertically — feels more aircraft-like)
+    fpvVelocity.z+=(dz/dist)*.15;
+    const fpvSpeed=Math.sqrt(fpvVelocity.x**2+fpvVelocity.y**2+fpvVelocity.z**2);
+    if(fpvSpeed>maxSpeed){const sc=maxSpeed/fpvSpeed;fpvVelocity.x*=sc;fpvVelocity.y*=sc;fpvVelocity.z*=sc;}
+    fpvCenter.x+=fpvVelocity.x; fpvCenter.y+=fpvVelocity.y; fpvCenter.z+=fpvVelocity.z;
+    statusLine3.textContent=`SPD: ${(fpvSpeed*22).toFixed(0)} km/h`;  // *22 = fake units
+
+    // Tighter lerp strengths (.18/.22) than in phase 1 — particles hug
+    // their fast-moving targets closely, with just a hint of smearing.
+    updateShahedTargets(); updateFpvBodyTargets();
+    for(let i=0;i<SHAHED_COUNT;i++){
+      particlePos[i*3]  +=(shahedTarget[i*3]  -particlePos[i*3])  *.18;
+      particlePos[i*3+1]+=(shahedTarget[i*3+1]-particlePos[i*3+1])*.18;
+      particlePos[i*3+2]+=(shahedTarget[i*3+2]-particlePos[i*3+2])*.18;
+    }
+    for(let i=0;i<FPV_BODY_COUNT;i++){
+      const gi=SHAHED_COUNT+i;
+      particlePos[gi*3]  +=(fpvBodyTarget[i*3]  -particlePos[gi*3])  *.22;
+      particlePos[gi*3+1]+=(fpvBodyTarget[i*3+1]-particlePos[gi*3+1])*.22;
+      particlePos[gi*3+2]+=(fpvBodyTarget[i*3+2]-particlePos[gi*3+2])*.22;
+    }
+
+    // IMPACT TRIGGER: when close enough, give EVERY particle (both
+    // aircraft) a random outward velocity — that's the whole explosion.
+    if(dist<16){
+      phase=3;phaseTime=0;flash('IMPACT','#ff2200');statusLine3.textContent='SPD: —';
+      reticleAlpha=0;
+      for(let i=0;i<TOTAL_COUNT;i++){
+        const ang=Math.random()*Math.PI*2, elev=(Math.random()-.5)*Math.PI;
+        const speed=25+Math.random()*90;
+        explosionVel[i*3]  =Math.cos(elev)*Math.cos(ang)*speed;
+        explosionVel[i*3+1]=Math.sin(elev)*speed*.8+10;   // +10 = bias upward
+        explosionVel[i*3+2]=Math.cos(elev)*Math.sin(ang)*speed;
+      }
+    }
+  }
+
+  else if (phase===3) {
+    // IMPACT — particles fly outward on their explosion velocities.
+    // `drag` shrinks toward 0.3 over the phase so the burst decelerates;
+    // gravity (the -16*dt line) starts pulling velocities down.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[3]);
+    reticleAlpha=Math.max(reticleAlpha-dt*3,0);
+    const drag=1-easeOutQuad(Math.min(phaseTime/PHASE_DURATION[3],1))*.7;
+    for(let i=0;i<TOTAL_COUNT;i++){
+      particlePos[i*3]  +=explosionVel[i*3]  *dt*drag;
+      particlePos[i*3+1]+=explosionVel[i*3+1]*dt*drag;
+      particlePos[i*3+2]+=explosionVel[i*3+2]*dt*drag;
+      explosionVel[i*3+1]-=16*dt;  // gravity
+    }
+    if(phaseTime>=PHASE_DURATION[3]){phase=4;phaseTime=0;flash('DESTROYED','#ffd700');}
+  }
+
+  else if (phase===4) {
+    // DESTROYED (ash fall) — debris drifts down. Gravity ramps up,
+    // horizontal motion is heavily damped, random jitter = smoke drift.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[4]);
+    const ashProgress=Math.min(phaseTime/PHASE_DURATION[4],1);
+    const gravity=lerp(8,28,ashProgress);
+    const horizDrag=lerp(0.06,0.02,ashProgress);
+    for(let i=0;i<TOTAL_COUNT;i++){
+      particlePos[i*3]  +=explosionVel[i*3]  *dt*horizDrag;
+      particlePos[i*3+1]+=explosionVel[i*3+1]*dt*horizDrag-gravity*dt;
+      particlePos[i*3+2]+=explosionVel[i*3+2]*dt*horizDrag;
+      particlePos[i*3]  +=(Math.random()-.5)*.08*dt;  // smoke jitter
+      particlePos[i*3+2]+=(Math.random()-.5)*.08*dt;
+    }
+    if(phaseTime>=PHASE_DURATION[4]){
+      // Reset both aircraft to their starting positions for the rebuild
+      phase=5;phaseTime=0;flash('RESTARTING','#00d2ff');
+      shahedCenter.set(0,0,0);fpvCenter.set(-55,-12,6);fpvVelocity.set(0.3,0.08,-0.04);
+      updateShahedTargets();updateFpvBodyTargets();
+    }
+  }
+
+  else if (phase===5) {
+    // REBUILDING — same converge logic as phase 0, but the particles now
+    // start from scattered ash instead of a random cube. Loops to phase 1.
+    if(phaseTime<0.05) setStatus(PHASE_LABEL[5]);
+    const strength=easeInOutCubic(Math.min(phaseTime/PHASE_DURATION[5],1))*.08;
+    updateShahedTargets();updateFpvBodyTargets();
+    for(let i=0;i<SHAHED_COUNT;i++){
+      particlePos[i*3]  +=(shahedTarget[i*3]  -particlePos[i*3])  *strength;
+      particlePos[i*3+1]+=(shahedTarget[i*3+1]-particlePos[i*3+1])*strength;
+      particlePos[i*3+2]+=(shahedTarget[i*3+2]-particlePos[i*3+2])*strength;
+    }
+    for(let i=0;i<FPV_BODY_COUNT;i++){
+      const gi=SHAHED_COUNT+i;
+      particlePos[gi*3]  +=(fpvBodyTarget[i*3]  -particlePos[gi*3])  *strength;
+      particlePos[gi*3+1]+=(fpvBodyTarget[i*3+1]-particlePos[gi*3+1])*strength;
+      particlePos[gi*3+2]+=(fpvBodyTarget[i*3+2]-particlePos[gi*3+2])*strength;
+    }
+    if(phaseTime>=PHASE_DURATION[5]){phase=1;phaseTime=0;}
+  }
+
+  // ── PROPELLER ROTATION ─────────────────────────────────────
+  // Props spin in phases 0-2 and 5 (not while exploded).
+  // During the intercept they spin up to 1.8x for urgency.
+  const propsOn = phase<3||phase===5;
+  const spinMult= phase===2 ? Math.min(1.0+phaseTime*.15,1.8) : 1.0;
+  if(propsOn){ for(let a=0;a<4;a++) propAngle[a]+=PROP_SPIN_SPEED[a]*PROP_SPIN_DIR[a]*spinMult*dt; }
+
+  // Compute each prop particle's world position on its spinning circle,
+  // write it into the trail ring buffer AND directly into particlePos.
+  // (Props are placed directly — not lerped — so they look rigid & fast.)
+  for(let i=0;i<FPV_PROP_COUNT;i++){
+    const arm=propMeta[i*4]|0, radius=propMeta[i*4+1], yOff=propMeta[i*4+2], phase0=propMeta[i*4+3];
+    const [sx,sz]=ARM_DIAGONALS[arm];
+    const ang=propAngle[arm]*PROP_SPIN_DIR[arm]+phase0;
+    const wx=fpvCenter.x+sx*FPV_ARM_LENGTH*.72+Math.cos(ang)*radius;  // motor pos + circle
+    const wy=fpvCenter.y+0.5+yOff;
+    const wz=fpvCenter.z+sz*FPV_ARM_LENGTH*.72+Math.sin(ang)*radius;
+
+    const trailIdx=(trailHead*FPV_PROP_COUNT+i)*3;
+    trailPositions[trailIdx]=wx; trailPositions[trailIdx+1]=wy; trailPositions[trailIdx+2]=wz;
+
+    const gi=SHAHED_COUNT+FPV_BODY_COUNT+i;
+    if(propsOn){ particlePos[gi*3]=wx; particlePos[gi*3+1]=wy; particlePos[gi*3+2]=wz; }
+    // When props are off (explosion), positions stay under the control of
+    // the explosion physics above — prop particles blow up like the rest.
+  }
+  trailHead=(trailHead+1)%TRAIL_SLOTS;
+
+  // ── COLORS: SHAHED + FPV BODY ───────────────────────────────
+  // Colors are recomputed every frame. The color bands below use index
+  // fraction fi=i/count with the SAME thresholds the shape builder used
+  // (0.56, 0.73, 0.85, 0.94) — the intent is "color each body part".
+  // QUIRK: the builder picked each particle's part with an independent
+  // Math.random(), NOT by index, so index bands don't actually map to
+  // parts — e.g. "exhaust" colored particles (fi>0.94) are sprinkled
+  // over the whole airframe. Visually it reads as random hot sparkles.
+  // To truly color by part, the builder would need to store each
+  // particle's part id (like propMeta does for props).
+  // During explosion (phases 3-4) colors blend on top of the base:
+  // base → red flash → orange fire → grey ash.
+  const isExploding = phase===3||phase===4;
+  const explosionProgress = phase===3 ? Math.min(phaseTime/PHASE_DURATION[3], 1) : (phase===4 ? 1 : 0);
+  const ashProgress       = phase===4 ? Math.min(phaseTime/PHASE_DURATION[4], 1) : 0;
+
+  for(let i=0;i<SHAHED_COUNT+FPV_BODY_COUNT;i++){
+    let r,g,b;
+    if(i<SHAHED_COUNT){
+      const fi=i/SHAHED_COUNT;  // index fraction picks a color band
+      if(fi>0.94){
+        // exhaust: flickering hot orange (sin(t*7) = flicker)
+        r=1.0; g=0.55+Math.sin(t*7+i)*.12; b=0.05;
+      } else if(fi>0.85){
+        r=0.90; g=0.22; b=0.02;   // engine ring: orange-red
+      } else if(fi>0.73){
+        r=0.70; g=0.06; b=0.06;   // tail fin: red
+      } else if(fi<0.56){
+        // wings: gradient from dark red at root to bright red at tips
+        const spanFrac=Math.min(Math.abs(shahedShape[i*3+2])/38,1);
+        r=lerp(0.32,0.95,spanFrac); g=lerp(0.02,0.08,spanFrac); b=lerp(0.02,0.05,spanFrac);
+      } else {
+        r=0.42; g=0.04; b=0.04;   // fuselage: dark red
+      }
+    } else {
+      // FPV body: dark green, motors pulse brighter
+      const fi=(i-SHAHED_COUNT)/FPV_BODY_COUNT;
+      const isMotor=fi>0.38&&fi<0.66;
+      r=0.04; g=isMotor?0.52+Math.sin(t*9+i*.3)*.06:0.30; b=0.10;
+    }
+
+    if(isExploding){
+      // Stage 1 (phase 3): blend base color → red flash → orange fire
+      const burst  = Math.min(explosionProgress*3,1);        // fast flash-in
+      const settle = Math.max(0,explosionProgress*1.5-0.5);  // then settle to orange
+      const noise  = Math.random()*.08;                      // fire shimmer
+
+      const fireR = lerp(0.95, 1.0,  settle);
+      const fireG = lerp(0.05, 0.42, settle) + noise;
+      const fireB = lerp(0.00, 0.01, settle);
+
+      r = lerp(r, fireR, burst);
+      g = lerp(g, fireG, burst);
+      b = lerp(b, fireB, burst);
+
+      // Stage 2 (phase 4): orange → grey ash, everything dims
+      if(ashProgress>0){
+        const ash  = easeInOutCubic(ashProgress);
+        const grey = lerp(0.40, 0.18, ashProgress);   // darkens as it falls
+        const fade = 1.0 - ashProgress*0.55;          // overall dimming
+        r = lerp(r, grey,      ash) * fade;
+        g = lerp(g, grey*0.92, ash) * fade;   // slight warm tint kept
+        b = lerp(b, grey*0.88, ash) * fade;
+      }
+    }
+    // Copy final position+color into BOTH render layers (core + glow)
+    coreLayer.positions[i*3]=particlePos[i*3]; coreLayer.positions[i*3+1]=particlePos[i*3+1]; coreLayer.positions[i*3+2]=particlePos[i*3+2];
+    glowLayer.positions[i*3]=particlePos[i*3]; glowLayer.positions[i*3+1]=particlePos[i*3+1]; glowLayer.positions[i*3+2]=particlePos[i*3+2];
+    coreLayer.colors[i*3]=r; coreLayer.colors[i*3+1]=g; coreLayer.colors[i*3+2]=b;
+    glowLayer.colors[i*3]=r; glowLayer.colors[i*3+1]=g; glowLayer.colors[i*3+2]=b;
+  }
+
+  // ── COLORS: PROPS + TRAIL ───────────────────────────────────
+  for(let i=0;i<FPV_PROP_COUNT;i++){
+    const gi=SHAHED_COUNT+FPV_BODY_COUNT+i;
+    // brightness shimmers with rotation angle → blade-flicker effect
+    const bright=propsOn?(0.42+0.15*Math.sin(propAngle[propMeta[i*4]|0]+i)):0;
+    coreLayer.positions[gi*3]=particlePos[gi*3]; coreLayer.positions[gi*3+1]=particlePos[gi*3+1]; coreLayer.positions[gi*3+2]=particlePos[gi*3+2];
+    coreLayer.colors[gi*3]=0.04; coreLayer.colors[gi*3+1]=bright; coreLayer.colors[gi*3+2]=0.10;
+    glowLayer.positions[gi*3]=particlePos[gi*3]; glowLayer.positions[gi*3+1]=particlePos[gi*3+1]; glowLayer.positions[gi*3+2]=particlePos[gi*3+2];
+    glowLayer.colors[gi*3]=0.03; glowLayer.colors[gi*3+1]=bright*.5; glowLayer.colors[gi*3+2]=0.08;
+  }
+
+  // Trail: copy every history slot into the trail layer; older slots
+  // get dimmer green (alpha baked into the color, since additive
+  // blending means "darker color" == "more transparent").
+  for(let slot=0;slot<TRAIL_SLOTS;slot++){
+    const age=1-((trailHead-slot+TRAIL_SLOTS)%TRAIL_SLOTS)/(TRAIL_SLOTS-1); // 1=newest
+    const alpha=age*age*0.5*(propsOn?1:0);
+    for(let i=0;i<FPV_PROP_COUNT;i++){
+      const si=(slot*FPV_PROP_COUNT+i)*3;
+      trailLayer.positions[si]=trailPositions[si]; trailLayer.positions[si+1]=trailPositions[si+1]; trailLayer.positions[si+2]=trailPositions[si+2];
+      trailLayer.colors[si]=0.04; trailLayer.colors[si+1]=alpha*0.7; trailLayer.colors[si+2]=alpha*0.15;
+    }
+  }
+
+  // Tell Three.js the CPU-side arrays changed and need re-upload to GPU
+  coreLayer.geometry.attributes.position.needsUpdate=true;  coreLayer.geometry.attributes.color.needsUpdate=true;
+  glowLayer.geometry.attributes.position.needsUpdate=true;  glowLayer.geometry.attributes.color.needsUpdate=true;
+  trailLayer.geometry.attributes.position.needsUpdate=true; trailLayer.geometry.attributes.color.needsUpdate=true;
+
+  // ── WIND STREAKS ────────────────────────────────────────────
+  // Active while flying (phases 1-2, 5), hidden during the explosion.
+  // Streaks speed up during the intercept for a sense of velocity.
+  const windOn=phase>=1&&phase<3||phase===5;
+  const windSpeedMult=phase===2?Math.min(1.0+phaseTime*.12,2.0):0.6;
+
+  for(let i=0;i<WIND_SHAHED_COUNT;i++){
+    const o=i*7;
+    if(windOn){
+      shahedWindData[o+6]-=dt; // countdown remaining life
+      if(shahedWindData[o+6]<=0){ spawnShahedStreak(shahedWindData,i); shahedWindMaxLife[i]=shahedWindData[o+6]; }
+      shahedWindData[o]  +=shahedWindData[o+3]*dt*windSpeedMult;
+      shahedWindData[o+1]+=shahedWindData[o+4]*dt*windSpeedMult;
+      shahedWindData[o+2]+=shahedWindData[o+5]*dt*windSpeedMult;
+      // gentle pull toward the Shahed's altitude → streaks curl behind it
+      shahedWindData[o+4]+=(shahedCenter.y-shahedWindData[o+1])*.5*dt;
+    }
+    const lifeMax=shahedWindMaxLife[i]>0?shahedWindMaxLife[i]:0.35;
+    const brightness=windOn ? Math.max(0,shahedWindData[o+6]/lifeMax) : 0; // fades with age
+    shahedWindLayer.positions[i*3]=shahedWindData[o]; shahedWindLayer.positions[i*3+1]=shahedWindData[o+1]; shahedWindLayer.positions[i*3+2]=shahedWindData[o+2];
+    shahedWindLayer.colors[i*3]=brightness; shahedWindLayer.colors[i*3+1]=brightness; shahedWindLayer.colors[i*3+2]=brightness; // white streaks
+  }
+
+  for(let i=0;i<WIND_FPV_COUNT;i++){
+    const o=i*7;
+    if(windOn){
+      fpvWindData[o+6]-=dt;
+      if(fpvWindData[o+6]<=0){ spawnFpvStreak(fpvWindData,i); fpvWindMaxLife[i]=fpvWindData[o+6]; }
+      fpvWindData[o]  +=fpvWindData[o+3]*dt*windSpeedMult;
+      fpvWindData[o+1]+=fpvWindData[o+4]*dt*windSpeedMult;
+      fpvWindData[o+2]+=fpvWindData[o+5]*dt*windSpeedMult;
+    }
+    const lifeMax=fpvWindMaxLife[i]>0?fpvWindMaxLife[i]:0.22;
+    const brightness=windOn ? Math.max(0,fpvWindData[o+6]/lifeMax) : 0;
+    fpvWindLayer.positions[i*3]=fpvWindData[o]; fpvWindLayer.positions[i*3+1]=fpvWindData[o+1]; fpvWindLayer.positions[i*3+2]=fpvWindData[o+2];
+    fpvWindLayer.colors[i*3]=brightness; fpvWindLayer.colors[i*3+1]=brightness; fpvWindLayer.colors[i*3+2]=brightness;
+  }
+
+  shahedWindLayer.geometry.attributes.position.needsUpdate=true; shahedWindLayer.geometry.attributes.color.needsUpdate=true;
+  fpvWindLayer.geometry.attributes.position.needsUpdate=true;    fpvWindLayer.geometry.attributes.color.needsUpdate=true;
+
+  // ── CAMERA ─────────────────────────────────────────────────
+  // Spherical orbit around the (smoothed) look-at point:
+  // yaw + pitch + distance → position on a sphere.
+  if(!isDragging) autoRotate+=.003;      // slow idle rotation
+  camLookCurrent.lerp(camLookTarget,.045); // smooth follow of the action
+  const yaw=autoRotate+orbitYaw, pitch=orbitPitch;
+  camera.position.set(
+    camLookCurrent.x+camDistance*Math.sin(yaw)*Math.cos(pitch),
+    camLookCurrent.y+camDistance*Math.sin(pitch),
+    camLookCurrent.z+camDistance*Math.cos(yaw)*Math.cos(pitch)
+  );
+  camera.lookAt(camLookCurrent);
+  renderer.render(scene, camera);
+
+  // ── TARGET RETICLE OVERLAY ─────────────────────────────────
+  // Project the Shahed's 3D center to screen pixels; the reticle chases
+  // that point with a lerp (12% per frame) so it lags realistically.
+  if(reticleAlpha>0){
+    const p=projectToScreen(shahedCenter.x, shahedCenter.y, shahedCenter.z);
+    if(p.z<1){   // only if in front of the camera
+      reticleX+=(p.x-reticleX)*.12;
+      reticleY+=(p.y-reticleY)*.12;
+    }
+  }
+  drawTargetUI(t);
+}
+
+animate();
+
+// Keep everything sized to the window
+window.addEventListener('resize',()=>{
+  camera.aspect=innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth,innerHeight);
+  resizeOverlay();
+});
+</script>
+</body>
+</html>

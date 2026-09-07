@@ -52,6 +52,19 @@ const glowTexture = (() => {
   return new THREE.CanvasTexture(cv);
 })();
 
+// A crisp round dot, in contrast to the soft glow above: a hard-edged
+// filled circle, antialiased only by the canvas rasteriser. Plain square
+// points read as chunky pixels once they cover more than a few device
+// pixels, which is what the shattered-object dots do at the detonation
+// camera height.
+const dotTexture = (() => {
+  const cv = document.createElement('canvas'); cv.width = cv.height = 32;
+  const cx = cv.getContext('2d');
+  cx.fillStyle = '#fff';
+  cx.beginPath(); cx.arc(16, 16, 13, 0, Math.PI*2); cx.fill();
+  return new THREE.CanvasTexture(cv);
+})();
+
 function makeGlow(color, size) {
   const s = new THREE.Sprite(new THREE.SpriteMaterial({
     map:glowTexture, color, transparent:true,
@@ -253,7 +266,7 @@ const smokePool = new ParticlePool(CFG.fx.poolSmoke, CFG.fx.sizeSmoke, {
 // own colours read correctly (the drone is nearly black, and additive
 // black draws nothing), and no sprite map so they stay crisp points.
 const shardPool = new ParticlePool(CFG.fx.poolShard, CFG.fx.sizeShard, {
-  blending: THREE.NormalBlending
+  blending: THREE.NormalBlending, map: dotTexture
 });
 
 // ═══════════════════════════════════════════════════
@@ -273,7 +286,7 @@ const shardPool = new ParticlePool(CFG.fx.poolShard, CFG.fx.sizeShard, {
 // ═══════════════════════════════════════════════════
 function buildPointCloud(root, count) {
   root.updateMatrixWorld(true);
-  const toLocal = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const parts = [];        // the source meshes, in traversal order
   const tris = [];
   let totalArea = 0;
 
@@ -282,7 +295,7 @@ function buildPointCloud(root, count) {
               ? o.geometry.attributes.position : null;
     if (!pos) return;                       // sprites, glows, empty stubs
     const idx = o.geometry.index;
-    const toRoot = new THREE.Matrix4().multiplyMatrices(toLocal, o.matrixWorld);
+    const part = parts.push(o) - 1;
     const c = o.material && o.material.color ? o.material.color : null;
     const col = c ? [c.r, c.g, c.b] : [0.5,0.5,0.5];
     const triCount = idx ? Math.floor(idx.count/3) : Math.floor(pos.count/3);
@@ -292,20 +305,25 @@ function buildPointCloud(root, count) {
       const i0 = idx ? idx.getX(t*3)   : t*3;
       const i1 = idx ? idx.getX(t*3+1) : t*3+1;
       const i2 = idx ? idx.getX(t*3+2) : t*3+2;
-      a.fromBufferAttribute(pos, i0).applyMatrix4(toRoot);
-      b.fromBufferAttribute(pos, i1).applyMatrix4(toRoot);
-      d.fromBufferAttribute(pos, i2).applyMatrix4(toRoot);
+      // kept in the SOURCE MESH's own space — see the note above about
+      // sub-objects that rotate independently of the root
+      a.fromBufferAttribute(pos, i0);
+      b.fromBufferAttribute(pos, i1);
+      d.fromBufferAttribute(pos, i2);
+      // area weighting assumes no scale on the mesh, which holds for
+      // everything here (all entities are unscaled primitives)
       const area = ab.subVectors(b,a).cross(ac.subVectors(d,a)).length()*0.5;
       if (!(area > 0)) continue;
       totalArea += area;
       tris.push({ ax:a.x, ay:a.y, az:a.z, bx:b.x, by:b.y, bz:b.z,
-                  cx:d.x, cy:d.y, cz:d.z, cum:totalArea, col });
+                  cx:d.x, cy:d.y, cz:d.z, cum:totalArea, col, part });
     }
   });
 
-  const pts = new Float32Array(count*3);
+  const pts  = new Float32Array(count*3);
   const cols = new Float32Array(count*3);
-  if (!tris.length) return { pts, cols, count:0 };
+  const src  = new Uint16Array(count);      // which mesh each dot came from
+  if (!tris.length) return { pts, cols, src, parts, count:0 };
 
   for (let i=0; i<count; i++) {
     // area-weighted pick, then a uniform point inside that triangle
@@ -320,24 +338,29 @@ function buildPointCloud(root, count) {
     pts[i*3+1] = T.ay*w + T.by*u + T.cy*v;
     pts[i*3+2] = T.az*w + T.bz*u + T.cz*v;
     cols[i*3] = T.col[0]; cols[i*3+1] = T.col[1]; cols[i*3+2] = T.col[2];
+    src[i] = T.part;
   }
-  return { pts, cols, count };
+  return { pts, cols, src, parts, count };
 }
 
 // Emit a cached cloud as flying dots. Velocities are radial from the
 // object's centre, so each dot leaves along the direction it sat in —
 // the shape visibly comes apart rather than scattering at random.
-const _m4 = new THREE.Matrix4();
 const _v3 = new THREE.Vector3();
 function shatter(cloud, root, spec, phys=PHYS.DEBRIS, tint=null) {
   if (!cloud || !cloud.count) return;
+  // Refresh every part's world matrix, then place each dot with the
+  // matrix of the mesh it was sampled from. This is what keeps the cloud
+  // aligned with sub-objects that move independently of the root — the
+  // enemy's turret being the case that caught it.
   root.updateMatrixWorld(true);
-  _m4.copy(root.matrixWorld);
   const n = Math.min(spec.count, cloud.count);
   const elevMax = spec.spreadDeg*DEG;
   const ox = root.position.x, oy = root.position.y, oz = root.position.z;
   for (let i=0; i<n; i++) {
-    _v3.set(cloud.pts[i*3], cloud.pts[i*3+1], cloud.pts[i*3+2]).applyMatrix4(_m4);
+    const part = cloud.parts[cloud.src[i]];
+    _v3.set(cloud.pts[i*3], cloud.pts[i*3+1], cloud.pts[i*3+2])
+       .applyMatrix4(part.matrixWorld);
     // outward from the object's centre, flattened toward the ground so
     // debris does not fly at the top-down camera (see sprayVelocity)
     let dx = _v3.x-ox, dy = _v3.y-oy, dz = _v3.z-oz;
@@ -1106,39 +1129,50 @@ function updateCamera(rdt) {
 }
 
 // ═══════════════════════════════════════════════════
-// INPUT — FIXED virtual joystick, pointer events (touch+mouse).
-// The first touch plants the stick where the finger lands and starts the
-// run. The anchor then STAYS PUT for the rest of the flight: direction is
-// the angle from anchor to finger, speed is the distance, capped at the
-// rim (screen up = world -Z, i.e. up the map). Finger near the anchor =
-// hover. RELEASE = DETONATE.
+// INPUT — FLOATING virtual joystick with a bounded zone.
+// The first touch plants a HOME point and starts the run. The stick's
+// anchor follows the finger once it passes the rim, so reversing after a
+// long swipe stays quick — but the anchor is penned inside `joyZone`
+// pixels of home, so the stick can never wander up the screen.
 //
-// The anchor used to slide along behind the finger once it passed the
-// rim. That made long swipes reverse quickly, but it read as "the stick
-// is still moving, so I must still be speeding up" while the output had
-// been capped since the rim — pushing further up the screen did nothing.
-// A fixed anchor makes the cap visible: the knob pins against the edge
-// and the ring lights up. The cost is that reversing after a long swipe
-// takes more thumb travel, which is the honest trade.
+// Once the anchor is pinned against the zone edge, extra finger travel
+// only steers: the magnitude is capped, the knob sits on the rim and the
+// ring lights up. That is the fix for the original confusion, where a
+// stick sliding endlessly up the screen implied speed that was not there.
+//
+// Screen up = world -Z (up the map). Finger near the anchor = hover.
+// RELEASE = DETONATE.
 // ═══════════════════════════════════════════════════
 let activePointer = null;
 let touching = false;
-const joy = { ax:0, ay:0,        // anchor (screen px) — fixed once planted
+const joy = { hx:0, hy:0,        // home — where the first touch landed
+              ax:0, ay:0,        // anchor — floats, but stays inside the zone
               fx:0, fy:0,        // finger (screen px)
               x:0,  y:0,         // output vector, each -1..1, deadzone applied
               saturated:false }; // at full deflection — drives the HUD cue
 
 function updateJoystick() {
-  const dx = joy.fx-joy.ax, dy = joy.fy-joy.ay;
-  const d = Math.hypot(dx, dy);
-  const R = CFG.player.joyRadius;
+  const R = CFG.player.joyRadius, Z = CFG.player.joyZone;
+  let dx = joy.fx-joy.ax, dy = joy.fy-joy.ay;
+  let d = Math.hypot(dx, dy);
+
+  if (d > R) {
+    // trail the anchor behind the finger, then pull it back inside the zone
+    let ax = joy.fx - dx/d*R, ay = joy.fy - dy/d*R;
+    const zx = ax-joy.hx, zy = ay-joy.hy;
+    const zd = Math.hypot(zx, zy);
+    if (zd > Z) { ax = joy.hx + zx/zd*Z; ay = joy.hy + zy/zd*Z; }
+    joy.ax = ax; joy.ay = ay;
+    dx = joy.fx-joy.ax; dy = joy.fy-joy.ay;
+    d = Math.hypot(dx, dy);
+  }
+
   if (d < CFG.player.joyDeadzone) {
     joy.x = 0; joy.y = 0; joy.saturated = false;
     return;
   }
-  // direction comes from the angle, magnitude from the distance capped
-  // at the rim — so travelling past the rim only ever steers, never
-  // accelerates, and the HUD says so.
+  // direction from the angle, magnitude from the distance capped at the
+  // rim — past the rim the stick only steers, and says so.
   const mag = Math.min(d, R) / R;
   joy.x = dx/d * mag;
   joy.y = dy/d * mag;
@@ -1155,8 +1189,8 @@ canvas.addEventListener('pointerdown', e => {
   if (state === S.WIN)  { openMenu(); return; }
   if (state === S.FAIL) { resetLevel(); return; }
   touching = true;
-  joy.ax = joy.fx = e.clientX;   // anchor planted here and left alone
-  joy.ay = joy.fy = e.clientY;
+  joy.hx = joy.ax = joy.fx = e.clientX;   // home + anchor start together
+  joy.hy = joy.ay = joy.fy = e.clientY;
   joy.x = joy.y = 0;
   joy.saturated = false;
   if (state === S.READY) {
@@ -1358,13 +1392,19 @@ function drawOverlay() {
   octx.clearRect(0,0,oc.width,oc.height);
 
   // ── virtual joystick ──
-  // Fixed ring at the anchor, knob at the current deflection. At full
-  // deflection the knob sits exactly on the rim and the ring brightens:
-  // that is the "this is as fast as it gets" cue. Pushing the thumb
-  // further out only steers.
+  // A dashed circle shows the zone the stick may drift inside; the solid
+  // ring is the stick itself. At full deflection the knob sits on the rim
+  // and the ring brightens: "this is as fast as it gets".
   if (touching && state === S.FLYING) {
-    const R = CFG.player.joyRadius;
+    const R = CFG.player.joyRadius, Z = CFG.player.joyZone;
     const sat = joy.saturated;
+
+    // the bounded movement zone, drawn around home
+    octx.strokeStyle = 'rgba(0,210,255,0.14)';
+    octx.lineWidth = 1;
+    octx.setLineDash([5,7]);
+    octx.beginPath(); octx.arc(joy.hx, joy.hy, Z, 0, Math.PI*2); octx.stroke();
+    octx.setLineDash([]);
 
     octx.fillStyle = 'rgba(0,210,255,0.08)';
     octx.beginPath(); octx.arc(joy.ax, joy.ay, R, 0, Math.PI*2); octx.fill();
@@ -1372,7 +1412,7 @@ function drawOverlay() {
     octx.lineWidth = sat ? 3 : 1.5;
     octx.beginPath(); octx.arc(joy.ax, joy.ay, R, 0, Math.PI*2); octx.stroke();
 
-    // small dot marking the fixed centre, so the anchor is unmistakable
+    // dot at the stick's centre, so its drift is legible
     octx.fillStyle = 'rgba(0,210,255,0.35)';
     octx.beginPath(); octx.arc(joy.ax, joy.ay, 3, 0, Math.PI*2); octx.fill();
 

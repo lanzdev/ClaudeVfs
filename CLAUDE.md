@@ -35,17 +35,18 @@ sprite halos).
 
 Top-down 3D. The FPV drone has no weapons — only its own detonation.
 
-**Controls (both modes).** Fixed virtual joystick: the first touch plants
-the stick where the finger lands and launches. The anchor then stays put —
-direction is the angle from anchor to finger, speed is the distance capped
-at the rim. **Releasing the finger detonates.** The only way to disengage
-is to commit.
+**Controls (both modes).** Floating virtual joystick with a bounded zone.
+The first touch plants a *home* point and launches. The stick's anchor
+trails the finger past the rim — so reversing after a long swipe stays
+quick — but is penned within `joyZone` pixels of home, so it can never
+wander up the screen. Direction is the angle from anchor to finger; speed
+is the distance, capped at the rim. **Releasing the finger detonates.**
 
-The anchor used to slide along behind the finger past the rim. Players read
-that as "the stick is still moving, so I must still be accelerating" while
-the output had been capped since the rim. With a fixed anchor the cap is
-visible: the knob pins against the edge and the ring brightens. The trade is
-that reversing after a long swipe costs more thumb travel.
+Both halves matter. An anchor that slides forever reads as "still moving,
+so still accelerating" when the output was capped at the rim; a fully fixed
+anchor makes reversing expensive. Penning the drift keeps the response and
+makes the cap visible — once the anchor hits the zone edge, extra travel
+only steers, the knob pins to the rim and the ring brightens.
 
 You also explode on: being shot, clipping an obstacle, ramming the target.
 *Any* explosion resolves the mission, so dying close enough still wins.
@@ -132,6 +133,13 @@ Chase a Shahed down a long corridor.
   silhouette has been read — otherwise the flash washes it out.
   Because the dots are sampled from the actual meshes, editing a model
   needs no matching edit to its death effect.
+- **Shatter dots are stored per source mesh, not per object.** Each dot
+  remembers which mesh it came from and is placed with that mesh's world
+  matrix. Caching the cloud in the *root's* space breaks any sub-object
+  that animates independently — the enemy's turret kept its startup angle
+  while the gun mesh aimed at the player. Dot size is in world units, so
+  check it against the detonation camera height (~48u): 0.45 came out as
+  chunky ~11px squares, 0.20 reads as fine grain.
 - **Particle pools take two clocks:** `update(sdt, rdt)`. Physics and
   lifetime run on simulation time so slow motion affects them; the hold
   runs on real time so a freeze-frame lasts a predictable number of

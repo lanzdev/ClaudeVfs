@@ -13,6 +13,12 @@ export const CFG = {
     hoverY:       2.3,       // flight altitude
     joyRadius:    85,        // px: joystick range (full deflection = full speed)
     joyDeadzone:  7,         // px: finger within this of the anchor = hover
+    joyZone:      70,        // px: how far the stick itself may drift from
+                             // where it was first planted. The anchor
+                             // follows the finger (so reversing is quick)
+                             // but is penned inside this zone, so the stick
+                             // cannot wander up the screen and imply speed
+                             // that is not there.
   },
   enemy: {
     detectRadius: 58,        // acoustic detection — hears you through walls
@@ -115,7 +121,12 @@ export const CFG = {
     shatterDrone:  { count:420, speed:[ 9,38], spreadDeg:38, life:[0.9,2.0], hold:[0.42,0.60] },
     shatterEnemy:  { count:560, speed:[11,46], spreadDeg:38, life:[0.9,2.2], hold:[0.42,0.60] },
     shatterShahed: { count:520, speed:[13,52], spreadDeg:46, life:[0.9,2.0], hold:[0.42,0.60] },
-    sizeShard:  0.45,  // the shattered-object dots
+    // Dot size in WORLD units, and the detonation camera sits ~48 units
+    // up: on-screen pixels ≈ size * frameHeight / (2·tan(fov/2)·distance),
+    // so 0.45 came out ~14 device px on a 2x phone screen — chunky
+    // squares. 0.20 lands nearer 6 px, which reads as fine grain.
+    // Raise it if the cloud looks too sparse on a big screen.
+    sizeShard:  0.20,  // the shattered-object dots
     poolShard: 3000,
 
     // point size in world units — smaller reads as finer debris

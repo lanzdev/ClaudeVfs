@@ -72,11 +72,18 @@ Chase a Shahed down a long corridor.
 - **Two collider kinds, both flat.** Axis-aligned boxes (walls, blocks,
   house wall segments) and circles (tree trunks). Both block movement,
   bullets, and line of sight. The game is 2D underneath a 3D presentation.
-- **Houses are enterable.** Each is four thick walls with gaps: a `door`
-  gap (13 units, ~4 drones abreast) is flyable at speed; a `window` gap
-  (2.2 units) is not — the drone is 2.8 wide — but bullets and enemy sight
-  pass straight through. A house is cover you can hide *inside* that can
-  still be shot into.
+- **Houses are enterable.** Each is four thick walls with gaps:
+  - a `door` (13 units, ~4 drones abreast) is flyable at speed without
+    lining anything up;
+  - a `window` (4.2 units) is **threading the needle** — 0.7 units of
+    clearance per side through a wall 2.8 thick, so you must be squared up
+    and centred for the whole passage, not just at the mouth. A shortcut
+    for a confident pilot, a wreck for a careless one.
+  - Bullets and enemy sight pass through both. A house is cover you can
+    hide *inside* that can still be shot into.
+  - **Asymmetry worth preserving:** the enemy's body is 6 units across, so
+    it can use doors but never windows. Windows are the player's move.
+
   **Houses must stay axis-aligned**: rotating one would require oriented-box
   tests in every collision and LoS call.
 - **Level geometry is deterministic.** Groves are generated, not

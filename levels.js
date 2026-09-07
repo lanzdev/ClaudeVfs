@@ -54,8 +54,13 @@ const MAT = {
 // Opening sizes. The drone is 2.8 units wide (radius 1.4).
 export const OPENING = {
   door:   13.0,  // ~4 drones abreast: readable from altitude, and you can
-                 // fly through at speed without threading a needle
-  window:  2.2,  // bullets and sight pass; the drone does NOT fit
+                 // fly through at speed without lining anything up
+  window:  4.2,  // THREADING THE NEEDLE: 0.7 units of clearance per side,
+                 // through a wall 2.8 thick — so you must be lined up for
+                 // the whole passage, not just at the mouth. A shortcut
+                 // for a confident pilot, a wreck for a careless one.
+                 // Also an asymmetry worth keeping: the enemy's body is
+                 // 6 units across, so it can use doors but never windows.
 };
 
 // ── Solid block (the original "wall" obstacle) ──

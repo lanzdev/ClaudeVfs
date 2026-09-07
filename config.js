@@ -71,7 +71,12 @@ export const CFG = {
     height:   95,            // gameplay camera height
     backoff:  26,            // pulled back on +Z so the view tilts slightly
                              // (pure top-down hides 3D forms; a little tilt sells them)
-    followLerp: 0.06,
+    followLerp: 0.06,        // base follow rate, for normal flight
+    // ...but firm up as the camera falls behind, so a hard turn does not
+    // leave it trailing. Boost ramps in once the gap exceeds
+    // followCatchFrom and maxes at (1 + followCatchBoost)x.
+    followCatchFrom:  22,    // units of gap where catch-up starts
+    followCatchBoost: 3.0,
 
     // ── Look-ahead ──
     // At speed the drone outruns the view and obstacles arrive with no
@@ -79,14 +84,24 @@ export const CFG = {
     // travel. It eases in between leadFrom and leadFull of top speed,
     // over leadRampIn seconds, and drops back over leadRampOut.
     leadDistance: 30,        // units ahead at full lead
+    leadSideways: false,     // lead on world X too? Off: the maps run
+                             // north-south, so only the vertical axis is
+                             // worth looking into, and sideways lead makes
+                             // every strafe swing the view.
     leadFrom:     0.55,      // speed fraction where lead starts easing in
     leadFull:     0.90,      // speed fraction for full lead
     // These compound with followLerp, so the camera settles slower than
     // any one of them suggests: measured end-to-end, the lead reaches its
     // full offset about a second after you commit to full speed.
-    leadRampIn:   0.5,       // sec to wind the lead up
+    leadRampIn:   0.3,       // sec to wind the lead up
     leadRampOut:  0.4,       // sec to wind it back down
-    leadLerp:     0.075,     // smoothing on the lead vector (turns swing)
+    leadLerp:     0.01,      // base smoothing on the lead vector
+    // Rapid direction changes need the lead to swing across fast — at a
+    // 0.01 base rate a full reversal would take seconds. The boost scales
+    // with (1-dot)/2 between the current and wanted lead directions:
+    // 0 when unchanged, 1 when reversed. (Deliberately not the cross
+    // product — sin(180°) is 0, so it would not react to a reversal.)
+    leadTurnBoost: 14,       // rate multiplier at a full reversal
 
     boomHeight: 48,          // zoomed height during detonation cinematic
     // The detonation plays in three beats. First a near-freeze, long

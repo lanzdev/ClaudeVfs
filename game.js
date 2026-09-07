@@ -1129,12 +1129,35 @@ function updateLead(rdt) {
   const rate = want > leadCharge ? rdt/c.leadRampIn : -rdt/c.leadRampOut;
   leadCharge = clamp(leadCharge + clamp(want-leadCharge, -Math.abs(rate), Math.abs(rate)), 0, 1);
   const ease = leadCharge*leadCharge*(3-2*leadCharge);   // smoothstep
-  const tx = speed > 0.5 ? player.vel.x/speed * c.leadDistance * ease : 0;
+  // Lead only along screen-vertical (world Z) unless leadSideways is on.
+  // The maps run north-south, so that is the axis you actually need to
+  // see into; leading sideways as well swings the view around on every
+  // strafe and reads as the camera wobbling rather than looking ahead.
+  const tx = (speed > 0.5 && c.leadSideways) ? player.vel.x/speed * c.leadDistance * ease : 0;
   const tz = speed > 0.5 ? player.vel.z/speed * c.leadDistance * ease : 0;
-  // smooth the vector itself too, so hard turns swing the view around
-  // rather than flicking it
-  camLead.x = lerp(camLead.x, tx, c.leadLerp);
-  camLead.z = lerp(camLead.z, tz, c.leadLerp);
+
+  // Smooth the vector so gentle turns swing the view rather than flick
+  // it — but catch up fast when the heading really changes, or a hard
+  // reversal leaves the camera looking the wrong way for a second.
+  //
+  // The measure is (1-dot)/2 on the two directions: 0 when unchanged, 1
+  // when fully reversed. NOT the cross product, which is sin(angle) and
+  // so goes back to ZERO at 180° — no boost in precisely the case that
+  // needs it most.
+  // Compare the current lead against the DIRECTION OF TRAVEL, not against
+  // the target lead vector: mid-reversal the drone slows through the turn,
+  // so the target shrinks to nothing and there is no direction left to
+  // compare with — which is exactly when the boost is needed. Velocity
+  // flips well before the target has grown back.
+  const curLen = Math.hypot(camLead.x, camLead.z);
+  let turn = 0;
+  if (curLen > 0.5 && speed > 0.5) {
+    const dot = (camLead.x*player.vel.x + camLead.z*player.vel.z) / (curLen*speed);
+    turn = (1 - clamp(dot, -1, 1)) * 0.5;
+  }
+  const leadRate = Math.min(c.leadLerp * (1 + c.leadTurnBoost*turn), 1);
+  camLead.x = lerp(camLead.x, tx, leadRate);
+  camLead.z = lerp(camLead.z, tz, leadRate);
 }
 
 // Fills camFocus and returns the height the camera should sit at.
@@ -1150,7 +1173,14 @@ function computeCamFocus() {
 function updateCamera(rdt) {
   updateLead(rdt);
   const height = computeCamFocus();
-  camLook.lerp(camFocus, CFG.cam.followLerp);
+  // Follow softly when the camera is roughly where it belongs, and firm
+  // up as the gap grows. A single slow lerp either feels sluggish after
+  // a hard turn or twitchy in normal flight; scaling with the gap gets
+  // both, and keeps the smooth base rate the flight was tuned around.
+  const gap = Math.hypot(camFocus.x-camLook.x, camFocus.z-camLook.z);
+  const c = CFG.cam;
+  const boost = 1 + c.followCatchBoost * clamp((gap - c.followCatchFrom) / c.followCatchFrom, 0, 1);
+  camLook.lerp(camFocus, Math.min(c.followLerp * boost, 1));
   shake = Math.max(shake - rdt*2.5, 0);
   const sx = (Math.random()-.5)*shake*2, sz = (Math.random()-.5)*shake*2;
   camera.position.set(

@@ -55,12 +55,13 @@ const MAT = {
 export const OPENING = {
   door:   13.0,  // ~4 drones abreast: readable from altitude, and you can
                  // fly through at speed without lining anything up
-  window:  4.2,  // THREADING THE NEEDLE: 0.7 units of clearance per side,
-                 // through a wall 2.8 thick — so you must be lined up for
-                 // the whole passage, not just at the mouth. A shortcut
-                 // for a confident pilot, a wreck for a careless one.
-                 // Also an asymmetry worth keeping: the enemy's body is
-                 // 6 units across, so it can use doors but never windows.
+  window:  5.4,  // THREADING THE NEEDLE: 1.3 units of clearance per side,
+                 // through a wall 2.8 thick — you still have to square up
+                 // and aim, but there is room to correct. Tolerates about
+                 // 3 units off-centre or a 17 u/s sideways drift.
+                 // HARD CEILING 6.0: the enemy's body is 6 units across,
+                 // and windows being the player's move — a way in and out
+                 // that the turret cannot follow through — is the point.
 };
 
 // ── Solid block (the original "wall" obstacle) ──

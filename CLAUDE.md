@@ -75,14 +75,16 @@ Chase a Shahed down a long corridor.
 - **Houses are enterable.** Each is four thick walls with gaps:
   - a `door` (13 units, ~4 drones abreast) is flyable at speed without
     lining anything up;
-  - a `window` (4.2 units) is **threading the needle** — 0.7 units of
-    clearance per side through a wall 2.8 thick, so you must be squared up
-    and centred for the whole passage, not just at the mouth. A shortcut
-    for a confident pilot, a wreck for a careless one.
+  - a `window` (5.4 units) is **threading the needle** — 1.3 units of
+    clearance per side through a wall 2.8 thick, so you must square up and
+    aim, but there is room to correct (about 3 units off-centre, or a
+    17 u/s sideways drift). A shortcut for a confident pilot.
   - Bullets and enemy sight pass through both. A house is cover you can
     hide *inside* that can still be shot into.
-  - **Asymmetry worth preserving:** the enemy's body is 6 units across, so
-    it can use doors but never windows. Windows are the player's move.
+  - **Asymmetry worth preserving, and a hard ceiling of 6.0 on the window
+    width:** the enemy's body is 6 units across, so it can use doors but
+    never windows. A way in and out that the turret cannot follow through
+    is the point of the mechanic.
 
   **Houses must stay axis-aligned**: rotating one would require oriented-box
   tests in every collision and LoS call.

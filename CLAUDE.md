@@ -1,6 +1,6 @@
 # ClaudeVfx — FPV // STRIKE
 
-Browser game project. Everything runs as plain HTML + JavaScript with no
+Browser game project. Everything runs as plain HTML + ES modules with no
 build step, because development happens **entirely on an Android phone**
 (Acode editor + Termux for git). That constraint drives every technical
 choice here.
@@ -9,132 +9,143 @@ choice here.
 
 | File | Purpose |
 |---|---|
-| `index.html` | **The game.** Single self-contained file. This is the live deliverable. |
-| `fpv-3d-intercept.html` | Reference demo (not written by the project owner). A particle-morph animation of an FPV intercepting a Shahed. Kept as a technique reference — do not modify. |
-| `fpv-3d-intercept_annotated.html` | Heavily commented study copy of the demo, with renamed variables. Explains the particle-morph technique. |
+| `index.html` | Shell only: markup, CSS, menu overlay, import map. No game logic. |
+| `config.js` | `CFG` — every tunable number. How the game *feels*. |
+| `levels.js` | Level definitions + world builders (`addBox`, `addHouse`, `addTree`, `addGrove`). The *shape* of each mission. |
+| `game.js` | Engine: renderer, particles, entities, AI, input, HUD, states, main loop. |
+| `fpv-3d-intercept.html` | Reference demo (not written by the project owner). Particle-morph animation. Kept as a technique reference — do not modify. |
+| `fpv-3d-intercept_annotated.html` | Heavily commented study copy of that demo. |
 
-## Stack and constraints
-
-- **Three.js r128**, loaded from cdnjs via an `<script type="importmap">`.
-  No npm, no bundler, no compile step.
-- One `.html` file containing HTML + CSS + an ES module `<script>`.
-- Deploy = `git push` → GitHub Pages serves it. Repo: `lanzdev/ClaudeVfs`.
-- Target device is a phone: cap pixel ratio, keep particle counts modest,
-  avoid per-frame allocations, avoid post-processing (no real bloom —
-  glow is faked with additive sprite halos).
+Modules are loaded directly by the browser (`<script type="module" src="./game.js">`)
+with Three.js r128 resolved through the import map in `index.html`. No npm,
+no bundler, no compile step. Deploy = `git push` → GitHub Pages. Repo:
+`lanzdev/ClaudeVfs`.
 
 **Owner background:** Unity developer, new to JavaScript. Explanations
 should lean on Unity analogies (Scene/Camera/Mesh/Material/`Update()`).
-Code comments should explain *why*, and stay readable to someone who does
-not know JS idioms.
+Comments explain *why*, and stay readable to someone who does not know JS
+idioms.
+
+**Phone target:** cap pixel ratio, keep particle counts modest, avoid
+per-frame allocations, no post-processing (glow is faked with additive
+sprite halos).
 
 ## The game
 
-Top-down 3D kamikaze-approach game. Not a shooter — the FPV drone has no
-weapons, only its own detonation.
+Top-down 3D. The FPV drone has no weapons — only its own detonation.
 
-**Core loop**
-1. Fly from your spawn toward a patrolling enemy across a large map.
-2. Use obstacles as cover to survive its bursts and close the distance.
-3. Detonate with the enemy inside your blast radius.
+**Controls (both modes).** Relative virtual joystick: the first touch
+anchors the stick where the finger lands and launches; offset from that
+anchor sets direction and speed; the anchor is dragged along if the finger
+passes the rim. **Releasing the finger detonates.** The only way to
+disengage is to commit.
 
-**Rules**
-- Touch and hold = fly. **Releasing your finger detonates** — the only way
-  to disengage is to commit.
-- You also explode on: being shot, clipping an obstacle, ramming the enemy.
-- *Any* explosion resolves the level: enemy inside blast radius → win;
-  outside → restart. Dying close enough still wins.
-- The enemy **hears** you (acoustic detection radius) and tracks you
+You also explode on: being shot, clipping an obstacle, ramming the target.
+*Any* explosion resolves the mission, so dying close enough still wins.
+
+### Mode `strike` (mission 1 — HUNTER)
+Cross a village and destroy a patrolling gun position.
+- The enemy **hears** you: inside its acoustic radius it tracks you
   through walls, but only **shoots** with clear line of sight. Cover keeps
   you alive, not hidden.
-- It fires 30-round bursts, then reloads — the reload window is when you
-  advance.
+- It fires 30-round bursts, then reloads — the reload window (signalled by
+  its core pulsing fast) is when you advance.
+- **Flee AI**: inside `fleeRadius` it stops patrolling and backs away
+  while still shooting (kiting). `fleeSpeed` is well under the player's,
+  so it is always catchable — running just costs you time under fire. If
+  boxed in, it stands and fights.
+- Win: detonate with the enemy inside the blast radius.
 
-**Controls: relative virtual joystick.** First touch anchors the stick
-where the finger lands; offset from that anchor sets direction and speed.
-The anchor is dragged along if the finger passes the rim, so long swipes
-never pin the stick. Deadzone near the anchor = hover.
+### Mode `intercept` (mission 2 — INTERCEPT)
+Chase a Shahed down a long corridor.
+- It flies straight and level at altitude, **ignoring every obstacle**.
+  You are faster but fly low, so the obstacles are the entire difficulty.
+- It is drawn 15 units up while the camera looks straight down, so a
+  **ground shadow blob** marks its true plan-view position. The shadow,
+  not the aircraft, is what your blast has to reach.
+- Win: detonate beneath it (`blastRadius * catchFactor`).
+  Lose: it crosses the city line, or you die away from it.
 
-## Visual direction
+## Mechanics worth knowing before editing
 
-- Readable solid forms with smooth edges, built from Three.js primitives —
-  no external 3D models (no desktop for Blender).
-- **Enemy** = circle head + stick gun. Bullets leave the stick's far end.
-- **Player drone** = square base + 4 circle motors, rotates to face its
-  movement direction, glowing cyan pod marks the front.
-- Objects are `THREE.Group`s of sub-meshes so each part carries its own
-  material and color.
-- **Glow is a gameplay language**, not decoration: glowing = vulnerable or
-  important. The enemy's amber core pulses fast while reloading. The blast
-  ring turns green and pulses when the kill is live.
-- Particles are for explosions, debris, thrust and sparks — solid while
-  alive, particle burst on death.
-- Faction colors: drone explodes **black** (smoke), enemy explodes **red**.
-
-## Code map (`index.html`)
-
-The script is one module, sectioned by banner comments in this order:
-
-```
-CONFIG          all tunable numbers (see below)
-RENDERER/SCENE  Three.js setup, lights, ground, world border
-GLOW HELPERS    additive sprite halos (cheap fake bloom)
-PARTICLES       physics presets, spray, pooled particle system, explosions
-WORLD           obstacle boxes + collision / line-of-sight math
-PLAYER          drone mesh, movement, blast ring
-ENEMY           mesh, patrol AI, acoustic detection, shooting
-BULLETS         projectile pool
-EXPLOSIONS      detonation + win/lose resolution
-CAMERA          follow cam, detonation dive, shake
-INPUT           pointer events → virtual joystick
-HUD             DOM status lines + 2D overlay canvas (markers, joystick)
-GAME STATE      READY / FLYING / BOOM / WIN / FAIL + resetLevel()
-MAIN LOOP       animate()
-```
-
-### Key conventions
-
-- **`CFG` is the single tuning surface.** Gameplay feel, map bounds,
-  camera, and all FX live there. Change a number, reload the page.
-- **`CFG.fx` holds one block per particle emitter**, e.g.
-  `droneDebris: { count, speed:[min,max], spreadDeg, life:[min,max] }`.
-  `speed` = how far the spray reaches; `spreadDeg` = the vertical cone
-  above the ground; horizontal direction is always 360°.
-- **Two clocks in the main loop:** `rdt` is real time (camera, cinematics,
-  UI), `sdt = rdt * timeScale` is simulation time (physics, AI, bullets).
-  Slow motion shrinks `sdt` while `rdt` keeps flowing.
-- **Particle pools are fixed-size ring buffers.** Emitting more than a
-  pool holds recycles its oldest particles — raising a count is safe.
-- **Additive black is invisible**, so the drone's black smoke uses a
-  separate normal-blended pool that fades toward the fog color.
+- **Two collider kinds, both flat.** Axis-aligned boxes (walls, blocks,
+  house wall segments) and circles (tree trunks). Both block movement,
+  bullets, and line of sight. The game is 2D underneath a 3D presentation.
+- **Houses are enterable.** Each is four walls with gaps: a `door` gap
+  (8 units) is flyable; a `window` gap (2 units) is not — the drone is 2.8
+  wide — but bullets and enemy sight pass straight through. A house is
+  cover you can hide *inside* that can still be shot into.
+  **Houses must stay axis-aligned**: rotating one would require oriented-box
+  tests in every collision and LoS call.
+- **Trees block sight**, so a grove is a concealment corridor. Acoustic
+  detection ignores cover entirely — that is the intended tension.
+- **Shahed weave tuning is a speed-budget problem.** Matching its lateral
+  motion eats into the player's max speed. At `weaveAmp 30 / weavePeriod 9`
+  the peak lateral rate is ~21, leaving ~51 of forward capacity against the
+  Shahed's 45, so closing is always possible. A faster weave creates moments
+  where the chase cannot be won at all, which reads as unfair, not hard.
 - **The camera looks straight down**, so "up" is "at the player's face":
-  keep explosion cones well under 90° or debris flies at the lens.
-- Two canvases are stacked: WebGL for the 3D scene, a 2D canvas overlay
-  for HUD markers (enemy state, off-screen direction chevron, joystick).
+  keep explosion cones (`spreadDeg`) well under 90° or debris flies at the lens.
+- **Additive black is invisible**, so the drone's black smoke uses a
+  separate normal-blended pool that fades toward the fog colour.
+- **Two clocks in the main loop:** `rdt` is real time (camera, cinematics,
+  UI); `sdt = rdt * timeScale` is simulation time (physics, AI, bullets).
+  Slow motion shrinks `sdt` while `rdt` keeps flowing.
+- **Particle pools are fixed-size ring buffers.** Emitting more than a pool
+  holds recycles its oldest particles, so raising a count is always safe.
+- Two canvases are stacked: WebGL for the 3D scene, a 2D canvas overlay for
+  HUD markers (target state, off-screen direction chevron, joystick).
+
+## Adding a level
+
+Append a def to `LEVELS` in `levels.js` — the menu builds its buttons from
+that array, so no other file changes:
+
+```js
+{ id, name, blurb, mode:'strike'|'intercept',
+  world:{minX,maxX,minZ,maxZ}, playerStart,
+  build(api){ /* api.worldGroup, api.boxes, api.trees */ },
+  enemy:{ waypoints:[...] },              // strike
+  shahed:{ start, escapeZ } }             // intercept
+```
+
+`buildWorld()` in `game.js` wipes the previous level's meshes (disposing
+geometry; materials are shared constants in `levels.js` and are
+deliberately not disposed) and rebuilds the collider arrays.
 
 ## Verifying changes
 
-There is no test suite and no way to see the game from the terminal.
-After editing, at minimum syntax-check the module:
+There is no way to see the game from the terminal, so verify mechanically.
 
-```bash
-awk '/<script type="module">/{f=1;next}/<\/script>/{f=0}f' index.html > /tmp/game.mjs
-node --check /tmp/game.mjs
-```
+1. **Syntax**: `node --check config.js && node --check levels.js && node --check game.js`
+2. **Headless run**: stub Three.js and the DOM, import `game.js`, and step
+   the main loop by draining a `requestAnimationFrame` queue. This catches
+   what `--check` cannot — TDZ errors, bad property access, NaN, and
+   crashes across level switches. Fire synthetic `pointerdown` /
+   `pointermove` / `pointerup` on the canvas stub to play the game
+   programmatically; read entity positions back out of the scene graph.
+3. **Level validation**: run `build()` against a Three.js stub and assert
+   on the collider arrays — spawn and waypoints clear, patrol legs
+   unobstructed, doors wider than the drone, windows narrower, and a flood
+   fill from spawn reaching ~100% of open cells (this is also what proves
+   every house interior is enterable).
+4. **Balance simulation**: for anything tuned by feel, simulate a pilot
+   against the real level geometry rather than guessing. This is how the
+   Shahed's speed was set — 48 made the chase mathematically unwinnable,
+   45 gives a catch at roughly half the corridor.
 
-For gameplay math (map layout, particle trajectories, spread), write a
-throwaway `node -e` simulation rather than guessing — past bugs found this
-way include a patrol path clipping an obstacle and debris flying into the
-camera.
+Past bugs caught this way: a patrol path clipping an obstacle, debris
+flying into the camera, and an uncatchable Shahed.
 
 ## Status and next steps
 
-Working prototype: one enemy, one map, full win/lose loop.
+Two working missions, menu, full win/lose loops.
 
-Known open items:
-- The approach can feel empty — the map is large with a single enemy.
-  Content (more enemies, patrol routes that come to meet the player)
-  rather than a smaller map.
-- No sound, no menus, no score, no level progression.
-- Particles do not collide with obstacles (skipped: ~36 boxes × thousands
-  of particles per frame is too costly on a phone).
+Open items:
+- No sound, no score, no persistence of progress.
+- Only one enemy per strike map; multiple enemies would need the entity
+  turned into an array (currently a single object).
+- Particles do not collide with obstacles (skipped: thousands of particles
+  against ~100 colliders per frame is too costly on a phone).
+- The intercept corridor is built from a repeating band pattern — fine for
+  one mission, but it will read as repetitive if reused.

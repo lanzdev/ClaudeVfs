@@ -119,8 +119,23 @@ Chase a Shahed down a long corridor.
   world space. Banking into a turn toward +X needs a POSITIVE `rotation.z`
   and `π - offset` for yaw. Derive signs from the rotation matrices rather
   than guessing; getting them backwards makes it lean out of its turns.
-- **Additive black is invisible**, so the drone's black smoke uses a
-  separate normal-blended pool that fades toward the fog colour.
+- **Additive black is invisible**, so the drone's black smoke and the
+  shatter shards use normal-blended pools that fade toward the fog colour.
+- **Death = shatter, not a generic explosion.** When an object dies its
+  mesh is hidden and replaced by dots sampled from its own triangles
+  (`buildPointCloud` samples once at startup, area-weighted, cached in
+  local space; `shatter()` transforms them by the object's world matrix at
+  detonation). The dots **hold motionless in the object's exact shape**
+  for `hold` real seconds while the cinematic runs a near-freeze
+  (`cam.freezeScale`/`freezeTime`), then fly outward and decay. Smoke,
+  flash and embers carry their own `hold` so they bloom only after the
+  silhouette has been read — otherwise the flash washes it out.
+  Because the dots are sampled from the actual meshes, editing a model
+  needs no matching edit to its death effect.
+- **Particle pools take two clocks:** `update(sdt, rdt)`. Physics and
+  lifetime run on simulation time so slow motion affects them; the hold
+  runs on real time so a freeze-frame lasts a predictable number of
+  wall-clock seconds regardless of how deep the slow-mo is.
 - **Two clocks in the main loop:** `rdt` is real time (camera, cinematics,
   UI); `sdt = rdt * timeScale` is simulation time (physics, AI, bullets).
   Slow motion shrinks `sdt` while `rdt` keeps flowing.

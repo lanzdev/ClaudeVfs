@@ -67,8 +67,13 @@ export const CFG = {
                              // (pure top-down hides 3D forms; a little tilt sells them)
     followLerp: 0.06,
     boomHeight: 48,          // zoomed height during detonation cinematic
-    boomSlowmo: 0.28,        // time scale during the cinematic
-    boomTime:   1.6,         // real seconds of cinematic
+    // The detonation plays in three beats. First a near-freeze, long
+    // enough to read the dead object hanging in the air as a cloud of its
+    // own dots. Then slow motion while it comes apart. Then normal speed.
+    freezeScale: 0.04,       // time scale during the freeze (near-stopped)
+    freezeTime:  0.55,       // real seconds the freeze lasts
+    boomSlowmo:  0.28,       // time scale after the freeze
+    boomTime:    2.2,        // real seconds of cinematic overall
   },
   failRestartDelay: 2.4,     // sec before auto-restart after a miss
 
@@ -83,25 +88,39 @@ export const CFG = {
   //   life      [min,max] seconds before the particle dies
   // The horizontal direction is always a full 360° — these control the
   // vertical shape and the reach of the spray.
+  // Destruction itself is handled by the SHATTER block further down —
+  // these emitters are the accents layered on top of it.
   fx: {
     // ── DRONE (black) ──
-    droneDebris: { count:300, speed:[14,54], spreadDeg:36, life:[1.0,2.4] }, // frame chunks
-    droneSmoke:  { count:260, speed:[ 5,21], spreadDeg:52, life:[1.4,3.2] }, // lingering cloud
-    droneFlash:  { count: 90, speed:[20,62], spreadDeg:36, life:[0.22,0.44]},// white core
-    // ── ENEMY (red) ──
-    enemyDebris: { count:120, speed:[5,10], spreadDeg:36, life:[0.7,1.5] },
-    enemyEmbers: { count:120, speed:[5,20], spreadDeg:44, life:[0.5,1.4] }, // scatter further
-    // ── SHAHED (red, airborne) — bigger and wider: it dies at altitude
-    //    and rains down, so this one is allowed a taller cone ──
-    shahedDebris:{ count:260, speed:[16,52], spreadDeg:48, life:[1.0,2.2] },
-    shahedEmbers:{ count:160, speed:[24,70], spreadDeg:55, life:[0.6,1.6] },
+    // `hold` delays these so they bloom only once the dot silhouette has
+    // been seen — otherwise the flash washes the shape out immediately.
+    droneSmoke:  { count:260, speed:[ 5,21], spreadDeg:52, life:[1.4,3.2], hold:0.46 },
+    droneFlash:  { count: 90, speed:[20,62], spreadDeg:36, life:[0.22,0.44], hold:0.44 },
+    // ── ENEMY / SHAHED (red) — embers on top of the shattered dots ──
+    enemyEmbers: { count:120, speed:[5,20], spreadDeg:44, life:[0.5,1.4], hold:0.46 },
+    shahedEmbers:{ count:160, speed:[24,70], spreadDeg:55, life:[0.6,1.6], hold:0.46 },
     // ── SMALL STUFF ──
     ricochet:    { count:  8, speed:[ 6,20], spreadDeg:45, life:[0.3,0.3] },
     muzzle:      { count:  5, speed:[ 9,15], spreadDeg:12, life:[0.15,0.15]},
 
+    // ── SHATTER ──
+    // On death an object is replaced by a cloud of dots sampled from its
+    // own surfaces, which then fly apart and decay. The dots start in the
+    // exact shape of the thing that died, so the silhouette is readable
+    // for an instant before it comes apart — that is the whole effect.
+    // `count` here is dots per object; they carry the object's own colours.
+    // `hold` is [min,max] REAL seconds each dot sits motionless in the
+    // object's shape before flying — the freeze-frame. Jittered per dot
+    // so the cloud does not release as one rigid sheet.
+    shatterDrone:  { count:420, speed:[ 9,38], spreadDeg:38, life:[0.9,2.0], hold:[0.42,0.60] },
+    shatterEnemy:  { count:560, speed:[11,46], spreadDeg:38, life:[0.9,2.2], hold:[0.42,0.60] },
+    shatterShahed: { count:520, speed:[13,52], spreadDeg:46, life:[0.9,2.0], hold:[0.42,0.60] },
+    sizeShard:  0.45,  // the shattered-object dots
+    poolShard: 3000,
+
     // point size in world units — smaller reads as finer debris
-    sizeBurst: 0.55,   // glowing cores: flash, embers, enemy debris
-    sizeSmoke: 1.30,   // drone's black debris + smoke puffs
+    sizeBurst: 0.55,   // glowing cores: flash, embers
+    sizeSmoke: 1.30,   // drone's smoke puffs
     sizeSpark: 0.40,   // ricochets, muzzle flash
     sizeTrail: 0.40,   // drone thrust
 

@@ -102,9 +102,13 @@ const _col   = { r:0, g:0, b:0 };
 
 // Emit one burst from a CFG.fx emitter block. `colorFn(out, rnd)` fills
 // _col per particle, so each emitter keeps its own palette.
+// `spec.hold` (optional) delays the whole burst by that many real
+// seconds — used to let the shattered silhouette read before the fire
+// and smoke bloom over it.
 function emit(pool, spec, x,y,z, phys, power, colorFn, spawnJitter=0) {
   const n = Math.floor(spec.count*power);
   const elevMax = spec.spreadDeg*DEG;
+  const hold = spec.hold ?? 0;
   for (let i=0;i<n;i++) {
     const speed = lerp(spec.speed[0], spec.speed[1], Math.random())*power;
     const v = sprayVelocity(speed, elevMax, _spray);
@@ -114,7 +118,7 @@ function emit(pool, spec, x,y,z, phys, power, colorFn, spawnJitter=0) {
       x + (Math.random()-.5)*spawnJitter,
       y + Math.random()*spawnJitter,
       z + (Math.random()-.5)*spawnJitter,
-      v.x, v.y, v.z, life, _col.r, _col.g, _col.b, phys);
+      v.x, v.y, v.z, life, _col.r, _col.g, _col.b, phys, hold);
   }
 }
 
@@ -132,6 +136,7 @@ class ParticlePool {
     this.grav = new Float32Array(count);     // downward accel
     this.bnc  = new Float32Array(count);     // ground restitution (0 = no bounce)
     this.drg  = new Float32Array(count);     // air drag coefficient
+    this.dly  = new Float32Array(count);     // hold time before it moves
     this.head = 0;
     for (let i=0;i<count;i++) this.pos[i*3+1] = -999; // park below ground
     const g = new THREE.BufferGeometry();
@@ -157,15 +162,22 @@ class ParticlePool {
   // Overwrites the oldest slot — pool never grows.
   // `phys` is one of the shared PHYS presets below (passed by reference,
   // so spawning hundreds of particles allocates nothing).
-  spawn(x,y,z, vx,vy,vz, life, r,g,b, phys=PHYS.DEBRIS) {
+  // `delay` (REAL seconds) holds the particle motionless at full
+  // brightness before its physics starts — this is what lets a shattered
+  // object be seen as a dot cloud in its own shape before it flies apart.
+  spawn(x,y,z, vx,vy,vz, life, r,g,b, phys=PHYS.DEBRIS, delay=0) {
     const i = this.head; this.head = (this.head+1)%this.count;
     this.pos[i*3]=x;   this.pos[i*3+1]=y;   this.pos[i*3+2]=z;
     this.vel[i*3]=vx;  this.vel[i*3+1]=vy;  this.vel[i*3+2]=vz;
     this.base[i*3]=r;  this.base[i*3+1]=g;  this.base[i*3+2]=b;
     this.life[i]=life; this.max[i]=life;
     this.grav[i]=phys.grav; this.bnc[i]=phys.bounce; this.drg[i]=phys.drag;
+    this.dly[i]=delay;
   }
-  update(dt) {
+  // dt  = simulation time (scaled by slow motion) — physics and lifetime
+  // rdt = real time — the hold, so a freeze-frame lasts a predictable
+  //       number of wall-clock seconds no matter how deep the slow-mo is
+  update(dt, rdt = dt) {
     const c = this.colAttr.array;
     // Opaque particles can't fade by darkening (black is already black),
     // so they fade toward the background/fog color instead — which reads
@@ -177,6 +189,13 @@ class ParticlePool {
         c[i*3]=c[i*3+1]=c[i*3+2]=0;
         continue;
       }
+      // held: sit still at full brightness, not ageing yet
+      if (this.dly[i] > 0) {
+        this.dly[i] -= rdt;
+        c[i*3]=this.base[i*3]; c[i*3+1]=this.base[i*3+1]; c[i*3+2]=this.base[i*3+2];
+        continue;
+      }
+
       this.life[i] -= dt;
 
       // gravity + air drag (drag as a stable exponential-ish damping)
@@ -230,15 +249,129 @@ const smokePool = new ParticlePool(CFG.fx.poolSmoke, CFG.fx.sizeSmoke, {
   blending: THREE.NormalBlending, map: glowTexture
 });
 
+// Shard pool: the shattered-object dots. Normal blending so an object's
+// own colours read correctly (the drone is nearly black, and additive
+// black draws nothing), and no sprite map so they stay crisp points.
+const shardPool = new ParticlePool(CFG.fx.poolShard, CFG.fx.sizeShard, {
+  blending: THREE.NormalBlending
+});
+
+// ═══════════════════════════════════════════════════
+// SHATTER — turn a solid object into a cloud of dots
+//
+// Instead of hand-authoring a second, dot-shaped copy of every model
+// (the approach the reference demo used), the dots are SAMPLED from the
+// object's own triangles: pick a triangle with probability proportional
+// to its area, then a random point inside it. The cloud therefore always
+// matches whatever the object actually looks like, and editing a model
+// needs no matching edit here.
+//
+// Sampling is done ONCE at startup and cached in the object's local
+// space; at detonation the points are just transformed by the object's
+// current world matrix. Doing the triangle walk mid-explosion would
+// drop frames on a phone.
+// ═══════════════════════════════════════════════════
+function buildPointCloud(root, count) {
+  root.updateMatrixWorld(true);
+  const toLocal = new THREE.Matrix4().copy(root.matrixWorld).invert();
+  const tris = [];
+  let totalArea = 0;
+
+  root.traverse(o => {
+    const pos = o.isMesh && o.geometry && o.geometry.attributes
+              ? o.geometry.attributes.position : null;
+    if (!pos) return;                       // sprites, glows, empty stubs
+    const idx = o.geometry.index;
+    const toRoot = new THREE.Matrix4().multiplyMatrices(toLocal, o.matrixWorld);
+    const c = o.material && o.material.color ? o.material.color : null;
+    const col = c ? [c.r, c.g, c.b] : [0.5,0.5,0.5];
+    const triCount = idx ? Math.floor(idx.count/3) : Math.floor(pos.count/3);
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), d = new THREE.Vector3();
+    const ab = new THREE.Vector3(), ac = new THREE.Vector3();
+    for (let t=0; t<triCount; t++) {
+      const i0 = idx ? idx.getX(t*3)   : t*3;
+      const i1 = idx ? idx.getX(t*3+1) : t*3+1;
+      const i2 = idx ? idx.getX(t*3+2) : t*3+2;
+      a.fromBufferAttribute(pos, i0).applyMatrix4(toRoot);
+      b.fromBufferAttribute(pos, i1).applyMatrix4(toRoot);
+      d.fromBufferAttribute(pos, i2).applyMatrix4(toRoot);
+      const area = ab.subVectors(b,a).cross(ac.subVectors(d,a)).length()*0.5;
+      if (!(area > 0)) continue;
+      totalArea += area;
+      tris.push({ ax:a.x, ay:a.y, az:a.z, bx:b.x, by:b.y, bz:b.z,
+                  cx:d.x, cy:d.y, cz:d.z, cum:totalArea, col });
+    }
+  });
+
+  const pts = new Float32Array(count*3);
+  const cols = new Float32Array(count*3);
+  if (!tris.length) return { pts, cols, count:0 };
+
+  for (let i=0; i<count; i++) {
+    // area-weighted pick, then a uniform point inside that triangle
+    const target = Math.random()*totalArea;
+    let lo = 0, hi = tris.length-1;
+    while (lo < hi) { const mid = (lo+hi)>>1; if (tris[mid].cum < target) lo = mid+1; else hi = mid; }
+    const T = tris[lo];
+    let u = Math.random(), v = Math.random();
+    if (u+v > 1) { u = 1-u; v = 1-v; }      // fold into the triangle
+    const w = 1-u-v;
+    pts[i*3]   = T.ax*w + T.bx*u + T.cx*v;
+    pts[i*3+1] = T.ay*w + T.by*u + T.cy*v;
+    pts[i*3+2] = T.az*w + T.bz*u + T.cz*v;
+    cols[i*3] = T.col[0]; cols[i*3+1] = T.col[1]; cols[i*3+2] = T.col[2];
+  }
+  return { pts, cols, count };
+}
+
+// Emit a cached cloud as flying dots. Velocities are radial from the
+// object's centre, so each dot leaves along the direction it sat in —
+// the shape visibly comes apart rather than scattering at random.
+const _m4 = new THREE.Matrix4();
+const _v3 = new THREE.Vector3();
+function shatter(cloud, root, spec, phys=PHYS.DEBRIS, tint=null) {
+  if (!cloud || !cloud.count) return;
+  root.updateMatrixWorld(true);
+  _m4.copy(root.matrixWorld);
+  const n = Math.min(spec.count, cloud.count);
+  const elevMax = spec.spreadDeg*DEG;
+  const ox = root.position.x, oy = root.position.y, oz = root.position.z;
+  for (let i=0; i<n; i++) {
+    _v3.set(cloud.pts[i*3], cloud.pts[i*3+1], cloud.pts[i*3+2]).applyMatrix4(_m4);
+    // outward from the object's centre, flattened toward the ground so
+    // debris does not fly at the top-down camera (see sprayVelocity)
+    let dx = _v3.x-ox, dy = _v3.y-oy, dz = _v3.z-oz;
+    const len = Math.hypot(dx, dy, dz) || 1;
+    const speed = lerp(spec.speed[0], spec.speed[1], Math.random());
+    const flat = Math.hypot(dx, dz) || 1;
+    const elev = Math.min(Math.abs(Math.atan2(dy, flat)), elevMax) * Math.sign(dy||1);
+    const horiz = Math.cos(elev)*speed;
+    const vx = (dx/flat)*horiz + (Math.random()-.5)*4;
+    const vy = Math.sin(elev)*speed*0.55 + Math.random()*3;
+    const vz = (dz/flat)*horiz + (Math.random()-.5)*4;
+    const life = lerp(spec.life[0], spec.life[1], Math.random());
+    const r = tint ? lerp(cloud.cols[i*3],   tint[0], tint[3]) : cloud.cols[i*3];
+    const g = tint ? lerp(cloud.cols[i*3+1], tint[1], tint[3]) : cloud.cols[i*3+1];
+    const b = tint ? lerp(cloud.cols[i*3+2], tint[2], tint[3]) : cloud.cols[i*3+2];
+    // The hold is what makes this read as "the object turned into dots"
+    // rather than "an explosion happened": every dot sits exactly where
+    // its piece of the model was. A little per-dot jitter on the release
+    // stops the cloud from breaking apart as one rigid sheet.
+    const hold = spec.hold ? lerp(spec.hold[0], spec.hold[1], Math.random()) : 0;
+    shardPool.spawn(_v3.x, _v3.y, _v3.z, vx, vy, vz, life, r, g, b, phys, hold);
+  }
+}
+
+// Filled in once the entity meshes exist (see SHATTER CLOUDS below).
+let droneCloud = null, enemyCloud = null, shahedCloud = null;
+
 // ── DRONE DETONATION: black smoke ──
 // A dense charcoal cloud with a brief white-hot flash at the center,
 // so the blast still reads as an explosion and not just a dark puff.
 function explodeDrone(x,y,z, power=1) {
   const F = CFG.fx;
-  // heavy debris: chunks of frame thrown outward, bouncing and settling
-  emit(smokePool, F.droneDebris, x,y,z, PHYS.DEBRIS, power, (c,r) => {
-    const shade = 0.12+r*0.26; c.r=shade; c.g=shade; c.b=shade*1.08;  // cool-tinted black
-  });
+  // the drone itself comes apart into dots of its own airframe
+  shatter(droneCloud, player.group, F.shatterDrone, PHYS.DEBRIS);
   // lingering smoke cloud: slow, buoyant, stalls in place
   emit(smokePool, F.droneSmoke, x,y,z, PHYS.SMOKE, power, (c,r) => {
     const shade = 0.08+r*0.16; c.r=shade; c.g=shade; c.b=shade*1.10;
@@ -255,11 +388,10 @@ function explodeDrone(x,y,z, power=1) {
 // signature — the enemy just dies).
 function explodeEnemy(x,y,z, power=1) {
   const F = CFG.fx;
-  // glowing red debris thrown outward along the ground
-  emit(burstPool, F.enemyDebris, x,y,z, PHYS.DEBRIS, power, (c,r) => {
-    c.r=1.0; c.g=r*0.22; c.b=r*0.10;       // deep red → hot red
-  });
-  // light embers that skip and scatter further
+  // the turret comes apart into dots of itself, pushed halfway toward
+  // red so the faction colour still reads at a glance
+  shatter(enemyCloud, enemy.group, F.shatterEnemy, PHYS.DEBRIS, [1.0, 0.12, 0.05, 0.5]);
+  // hot embers on top, to keep the blast reading as fire
   emit(burstPool, F.enemyEmbers, x,y,z, PHYS.SPARK, power, (c,r) => {
     c.r=1.0; c.g=0.35+r*0.3; c.b=0.08;
   });
@@ -270,9 +402,8 @@ function explodeEnemy(x,y,z, power=1) {
 // the air, so the debris gets a taller cone and rains down.
 function explodeShahed(x,y,z, power=1) {
   const F = CFG.fx;
-  emit(burstPool, F.shahedDebris, x,y,z, PHYS.DEBRIS, power, (c,r) => {
-    c.r=1.0; c.g=r*0.24; c.b=r*0.10;
-  });
+  // the airframe comes apart at altitude and rains down
+  shatter(shahedCloud, shahed.group, F.shatterShahed, PHYS.DEBRIS, [1.0, 0.14, 0.05, 0.5]);
   emit(burstPool, F.shahedEmbers, x,y,z, PHYS.SPARK, power, (c,r) => {
     c.r=1.0; c.g=0.38+r*0.3; c.b=0.08;
   });
@@ -902,7 +1033,7 @@ function detonate(cause) {
 
   setState(S.BOOM);
   boomTimer = CFG.cam.boomTime;
-  timeScale = CFG.cam.boomSlowmo;
+  timeScale = CFG.cam.freezeScale;   // freeze on the shattered silhouette
   shake = 1.2;
   flash(cause, pendingWin ? '#ffd700' : '#ff2200');
 }
@@ -918,7 +1049,15 @@ function shahedEscaped() {
 
 function updateBoom(rdt) {  // rdt = REAL dt: the cinematic runs on real time
   boomTimer -= rdt;
-  timeScale = lerp(timeScale, boomTimer > 0.5 ? CFG.cam.boomSlowmo : 1, rdt*2);
+  // Three beats: a near-freeze while the object hangs in the air as a
+  // cloud of its own dots, then slow motion as it comes apart, then back
+  // to normal speed.
+  const elapsed = CFG.cam.boomTime - boomTimer;
+  if (elapsed < CFG.cam.freezeTime) {
+    timeScale = CFG.cam.freezeScale;
+  } else {
+    timeScale = lerp(timeScale, boomTimer > 0.5 ? CFG.cam.boomSlowmo : 1, rdt*2);
+  }
 
   if (enemyBoomDelay >= 0) {
     enemyBoomDelay -= rdt;
@@ -1040,6 +1179,15 @@ function pointerEnd(e) {
 }
 canvas.addEventListener('pointerup', pointerEnd);
 canvas.addEventListener('pointercancel', pointerEnd);
+
+// ═══════════════════════════════════════════════════
+// SHATTER CLOUDS — sampled once, now that every entity mesh exists.
+// A little more than the largest shatter count so the emitters can pick
+// a different subset each time and repeat kills do not look identical.
+// ═══════════════════════════════════════════════════
+droneCloud  = buildPointCloud(player.group, 700);
+enemyCloud  = buildPointCloud(enemy.group,  900);
+shahedCloud = buildPointCloud(shahed.group, 800);
 
 // ═══════════════════════════════════════════════════
 // MODES — the only place that knows how the game modes differ.
@@ -1350,7 +1498,8 @@ function resetLevel() {
   M.reset(level);
 
   for (let i=bullets.length-1;i>=0;i--) removeBullet(i);
-  burstPool.clear(); sparkPool.clear(); trailPool.clear(); smokePool.clear();
+  burstPool.clear(); sparkPool.clear(); trailPool.clear();
+  smokePool.clear(); shardPool.clear();
   timeScale = 1;
   hintEl.classList.remove('off');
   setState(S.READY);
@@ -1476,10 +1625,12 @@ function animate() {
   updatePlayer(sdt, t);
   M.update(sdt, t);
   updateBullets(sdt);
-  burstPool.update(sdt);
-  sparkPool.update(sdt);
-  trailPool.update(sdt);
-  smokePool.update(sdt);
+  // pools take both clocks: sdt drives physics, rdt drives the hold
+  burstPool.update(sdt, rdt);
+  sparkPool.update(sdt, rdt);
+  trailPool.update(sdt, rdt);
+  smokePool.update(sdt, rdt);
+  shardPool.update(sdt, rdt);
   updateShockwaves(sdt);
   updateCamera(rdt);
   updateHUD();

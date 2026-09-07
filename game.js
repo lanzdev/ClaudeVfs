@@ -892,16 +892,12 @@ function detonate(cause) {
   player.group.visible = false;
   player.alive = false;
 
-  // Did the blast take the mission target with it? Both modes compare
-  // HORIZONTAL distance only — in intercept mode you detonate beneath
-  // the Shahed, so its altitude must not count against you.
-  if (mode === 'intercept') {
-    const d = Math.hypot(shahed.pos.x-player.pos.x, shahed.pos.z-player.pos.z);
-    pendingWin = shahed.alive && d <= CFG.player.blastRadius*CFG.shahed.catchFactor;
-  } else {
-    const d = Math.hypot(enemy.pos.x-player.pos.x, enemy.pos.z-player.pos.z);
-    pendingWin = enemy.alive && d <= CFG.player.blastRadius;
-  }
+  // Did the blast take the mission target with it? Always HORIZONTAL
+  // distance — in intercept mode you detonate beneath the Shahed, so its
+  // altitude must not count against you.
+  const target = M.target();
+  const d = Math.hypot(target.pos.x-player.pos.x, target.pos.z-player.pos.z);
+  pendingWin = target.alive && d <= M.killRadius();
   enemyBoomDelay = pendingWin ? 0.22 : -1;   // target pops shortly after you
 
   setState(S.BOOM);
@@ -926,19 +922,9 @@ function updateBoom(rdt) {  // rdt = REAL dt: the cinematic runs on real time
 
   if (enemyBoomDelay >= 0) {
     enemyBoomDelay -= rdt;
-    if (enemyBoomDelay < 0) {
-      if (mode === 'intercept' && shahed.alive) {
-        shahed.alive = false;
-        shahed.group.visible = false;
-        shahed.shadow.visible = false;
-        explodeShahed(shahed.pos.x, shahed.pos.y, shahed.pos.z, 1.5);
-        shake = 1.6;
-      } else if (mode === 'strike' && enemy.alive) {
-        enemy.alive = false;
-        enemy.group.visible = false;
-        explodeEnemy(enemy.pos.x, 2, enemy.pos.z, 1.6);
-        shake = 1.6;
-      }
+    if (enemyBoomDelay < 0 && M.target().alive) {
+      M.destroyTarget();
+      shake = 1.6;
     }
   }
 
@@ -1042,8 +1028,146 @@ canvas.addEventListener('pointerup', pointerEnd);
 canvas.addEventListener('pointercancel', pointerEnd);
 
 // ═══════════════════════════════════════════════════
+// MODES — the only place that knows how the game modes differ.
+//
+// Everything else in this file (camera, particles, input, HUD chrome,
+// outcome cinematic, main loop) is shared and must stay mode-agnostic.
+// A mode answers a small fixed set of questions:
+//
+//   target()        the thing the player has to destroy — any object
+//                   with .pos and .alive
+//   killRadius()    how close the blast must be, horizontally
+//   markerHeight    height to project the HUD marker at (the Shahed is
+//                   marked at its shadow, not at the aircraft)
+//   enter(def)      one-time setup when the level loads
+//   reset(def)      per-attempt entity reset
+//   update(dt)      advance this mode's entities
+//   destroyTarget() kill + explode the target after a successful blast
+//   marker()        {label, color, alpha} for the on-screen target marker
+//   markerExtras()  optional extra drawing next to that marker
+//   status(inKill)  {text, color} for the third HUD status line
+//
+// Adding a mode = adding an entry here plus whatever entity it drives.
+// It should not require touching the HUD, the outcome logic or the loop.
+// ═══════════════════════════════════════════════════
+const MODES = {
+  strike: {
+    id: 'strike',
+    target:      () => enemy,
+    killRadius:  () => CFG.player.blastRadius,
+    markerHeight: 6,
+
+    enter(def) {
+      enemy.waypoints = def.enemy?.waypoints ?? [];
+      enemy.group.visible = true;
+      shahed.group.visible = false;
+      shahed.shadow.visible = false;
+    },
+    reset() {
+      const wps = enemy.waypoints;
+      enemy.pos.copy(wps[wps.length-1] ?? new THREE.Vector3());
+      enemy.wpIndex = 0;
+      enemy.alive = true;
+      enemy.group.visible = true;
+      enemy.alerted = false;
+      enemy.fleeing = false;
+      enemy.ammo = CFG.enemy.burstRounds;
+      enemy.reloading = false;
+      enemy.fireTimer = 0;
+      enemy.pauseTimer = 0;
+      enemy.stuckTimer = 0;
+      enemy.hasLoS = false;
+      unstickEnemy();          // in case a waypoint sits too near geometry
+      shahed.alive = false;
+    },
+    update(dt) { updateEnemy(dt); },
+    destroyTarget() {
+      enemy.alive = false;
+      enemy.group.visible = false;
+      explodeEnemy(enemy.pos.x, 2, enemy.pos.z, 1.6);
+    },
+    marker() {
+      if (enemy.reloading) return { label:'RELOADING', color:'#ffd700', alpha:0.9 };
+      if (enemy.hasLoS)    return { label:'FIRING',    color:'#ff3344', alpha:0.9 };
+      if (enemy.fleeing)   return { label:'EVADING',   color:'#ff8800', alpha:0.9 };
+      if (enemy.alerted)   return { label:'ALERT',     color:'#ff8800', alpha:0.9 };
+      return { label:'UNAWARE', color:'#557788', alpha:0.55 };
+    },
+    // ammo / reload bar above the turret
+    markerExtras(p, color) {
+      const bw = 46, bh = 4;
+      const frac = enemy.reloading
+        ? 1 - enemy.reloadTimer/CFG.enemy.reloadTime          // reload progress
+        : enemy.ammo/CFG.enemy.burstRounds;                   // rounds left
+      octx.strokeStyle = 'rgba(255,255,255,0.25)';
+      octx.strokeRect(p.x-bw/2, p.y-20, bw, bh);
+      octx.fillStyle = color;
+      octx.fillRect(p.x-bw/2, p.y-20, bw*frac, bh);
+    },
+    status(inKill) {
+      return inKill ? { text:'>> IN RANGE — RELEASE <<', color:'#33ff77' }
+                    : { text:'', color:'#33ff77' };
+    },
+  },
+
+  intercept: {
+    id: 'intercept',
+    target:      () => shahed,
+    killRadius:  () => CFG.player.blastRadius * CFG.shahed.catchFactor,
+    markerHeight: 0.5,        // mark the shadow on the ground, not the aircraft
+
+    enter(def) {
+      enemy.group.visible = false;
+      shahed.group.visible = true;
+      shahed.shadow.visible = true;
+    },
+    reset(def) {
+      const s = def.shahed;
+      shahed.pos.copy(s.start);
+      shahed.pos.y = CFG.shahed.altitude;
+      shahed.baseX = s.start.x;
+      shahed.escapeZ = s.escapeZ;
+      shahed.t = 0;
+      shahed.alive = true;
+      shahed.group.visible = true;
+      shahed.shadow.visible = true;
+      shahed.group.position.copy(shahed.pos);
+      shahed.shadow.position.set(shahed.pos.x, 0.12, shahed.pos.z);
+      enemy.alive = false;
+      enemy.alerted = false;
+      enemy.hasLoS = false;
+    },
+    update(dt, t) { updateShahed(dt, t); },
+    destroyTarget() {
+      shahed.alive = false;
+      shahed.group.visible = false;
+      shahed.shadow.visible = false;
+      explodeShahed(shahed.pos.x, shahed.pos.y, shahed.pos.z, 1.5);
+    },
+    marker() { return { label:'SHAHED-136', color:'#ff5533', alpha:0.9 }; },
+    // a line from the aircraft down to its shadow, so the altitude
+    // offset is unmistakable
+    markerExtras(p) {
+      const air = project(shahed.pos.x, shahed.pos.y, shahed.pos.z);
+      octx.strokeStyle = 'rgba(255,85,51,0.35)';
+      octx.lineWidth = 1;
+      octx.beginPath();
+      octx.moveTo(air.x, air.y); octx.lineTo(p.x, p.y);
+      octx.stroke();
+    },
+    status(inKill) {
+      if (!shahed.alive) return { text:'', color:'#33ff77' };
+      if (inKill) return { text:'>> BENEATH TARGET — RELEASE <<', color:'#33ff77' };
+      const toCity = Math.max(shahed.pos.z - shahed.escapeZ, 0);
+      return { text: `CITY IN: ${(toCity*2.5).toFixed(0)}m`,
+               color: toCity < 260 ? '#ff3344' : 'rgba(255,255,255,0.5)' };
+    },
+  },
+};
+
+// ═══════════════════════════════════════════════════
 // HUD — DOM status lines + flash, and a 2D overlay canvas
-// for markers that track world objects (enemy state + ammo bar).
+// for markers that track world objects (target state + extras).
 // ═══════════════════════════════════════════════════
 const sLine1 = document.getElementById('sLine1');
 const sLine2 = document.getElementById('sLine2');
@@ -1084,24 +1208,13 @@ function drawOverlay() {
     octx.beginPath(); octx.arc(kx, ky, 14, 0, Math.PI*2); octx.fill();
   }
 
-  // ── target marker: whichever entity this mode is hunting ──
-  const isStrike = mode === 'strike';
-  const target = isStrike ? enemy : shahed;
+  // ── target marker: the mode says who the target is and how it reads ──
+  const target = M.target();
   if (!target.alive) return;
-  // In intercept mode the aircraft is 15 units up; mark its SHADOW,
-  // because the shadow is what the blast has to reach.
-  const p = project(target.pos.x, isStrike ? 6 : 0.5, target.pos.z);
+  const p = project(target.pos.x, M.markerHeight, target.pos.z);
   if (p.z >= 1) return;
 
-  // state label + color
-  let label, color;
-  if (!isStrike)           { label = 'SHAHED-136'; color = '#ff5533'; }
-  else if (enemy.reloading){ label = 'RELOADING';  color = '#ffd700'; }
-  else if (enemy.hasLoS)   { label = 'FIRING';     color = '#ff3344'; }
-  else if (enemy.fleeing)  { label = 'EVADING';    color = '#ff8800'; }
-  else if (enemy.alerted)  { label = 'ALERT';      color = '#ff8800'; }
-  else                     { label = 'UNAWARE';    color = '#557788'; }
-
+  const { label, color, alpha } = M.marker();
   const onScreen = p.x > 0 && p.x < oc.width && p.y > 0 && p.y < oc.height;
 
   if (!onScreen) {
@@ -1118,7 +1231,7 @@ function drawOverlay() {
     octx.translate(cx, cy);
     octx.rotate(ang);
     octx.fillStyle = color;
-    octx.globalAlpha = (!isStrike || enemy.alerted) ? 0.9 : 0.55;
+    octx.globalAlpha = alpha;
     octx.beginPath();                    // chevron pointing along +x (= toward enemy)
     octx.moveTo(12, 0); octx.lineTo(-6, -8); octx.lineTo(-2, 0); octx.lineTo(-6, 8);
     octx.closePath(); octx.fill();
@@ -1138,51 +1251,19 @@ function drawOverlay() {
   octx.textAlign = 'center';
   octx.fillStyle = color;
   octx.fillText(label, p.x, p.y - 26);
-
-  if (isStrike) {
-    // ammo / reload bar (the Shahed has no gun, so strike mode only)
-    const bw = 46, bh = 4;
-    const frac = enemy.reloading
-      ? 1 - enemy.reloadTimer/CFG.enemy.reloadTime          // reload progress
-      : enemy.ammo/CFG.enemy.burstRounds;                   // remaining rounds
-    octx.strokeStyle = 'rgba(255,255,255,0.25)';
-    octx.strokeRect(p.x-bw/2, p.y-20, bw, bh);
-    octx.fillStyle = color;
-    octx.fillRect(p.x-bw/2, p.y-20, bw*frac, bh);
-  } else {
-    // a line from the aircraft down to its shadow, so the altitude
-    // offset is unmistakable
-    const air = project(target.pos.x, target.pos.y, target.pos.z);
-    octx.strokeStyle = 'rgba(255,85,51,0.35)';
-    octx.lineWidth = 1;
-    octx.beginPath();
-    octx.moveTo(air.x, air.y); octx.lineTo(p.x, p.y);
-    octx.stroke();
-  }
+  M.markerExtras?.(p, color);
 }
 
 function updateHUD() {
-  const isStrike = mode === 'strike';
-  const target = isStrike ? enemy : shahed;
-  const killRadius = isStrike
-    ? CFG.player.blastRadius
-    : CFG.player.blastRadius*CFG.shahed.catchFactor;
+  const target = M.target();
   const d = Math.hypot(target.pos.x-player.pos.x, target.pos.z-player.pos.z);
-  const inKill = target.alive && d <= killRadius;
+  const inKill = target.alive && d <= M.killRadius();
 
   sLine1.textContent = STATE_LABEL[state];
   sLine2.textContent = target.alive ? `DIST: ${(d*2.5).toFixed(0)}m` : 'DIST: —';
-  // intercept mode: how far the Shahed still has to run
-  if (!isStrike && shahed.alive) {
-    const toCity = Math.max(shahed.pos.z - shahed.escapeZ, 0);
-    sLine3.textContent = (state===S.FLYING && inKill)
-      ? '>> BENEATH TARGET — RELEASE <<'
-      : `CITY IN: ${(toCity*2.5).toFixed(0)}m`;
-    sLine3.style.color = inKill ? '#33ff77' : (toCity < 260 ? '#ff3344' : 'rgba(255,255,255,0.5)');
-  } else {
-    sLine3.textContent = (state===S.FLYING && inKill) ? '>> IN RANGE — RELEASE <<' : '';
-    sLine3.style.color = '#33ff77';
-  }
+  const st = M.status(inKill && state === S.FLYING);
+  sLine3.textContent = st.text;
+  sLine3.style.color = st.color;
 
   // blast ring feedback: dim red normally, bright green when the kill is live
   blastRing.position.x = player.pos.x;
@@ -1206,8 +1287,8 @@ let state = S.MENU;
 let failTimer = 0;
 let timeScale = 1;
 
-let level = LEVELS[0];   // current level definition
-let mode  = level.mode;  // 'strike' | 'intercept'
+let level = LEVELS[0];        // current level definition
+let M     = MODES[level.mode]; // active mode hooks — see the MODES section
 
 function setState(s) { state = s; }
 
@@ -1217,16 +1298,10 @@ const hintEl  = document.getElementById('hint');
 // Build the level: geometry, colliders, entities, then park in READY.
 function loadLevel(def) {
   level = def;
-  mode  = def.mode;
+  M = MODES[def.mode];
+  if (!M) throw new Error(`level "${def.id}" uses unknown mode "${def.mode}"`);
   buildWorld(def);
-
-  // strike-only entity
-  const isStrike = mode === 'strike';
-  enemy.waypoints = def.enemy?.waypoints ?? [];
-  enemy.group.visible = isStrike;
-  // intercept-only entity
-  shahed.group.visible  = !isStrike;
-  shahed.shadow.visible = !isStrike;
+  M.enter(def);
 
   camLook.copy(def.playerStart);
   camera.position.set(def.playerStart.x, CFG.cam.height,
@@ -1242,38 +1317,7 @@ function resetLevel() {
   player.group.visible = true;
   player.group.position.copy(player.pos);   // updatePlayer is idle until FLYING
 
-  if (mode === 'strike') {
-    const wps = enemy.waypoints;
-    enemy.pos.copy(wps[wps.length-1] ?? new THREE.Vector3());
-    enemy.wpIndex = 0;
-    enemy.alive = true;
-    enemy.group.visible = true;
-    enemy.alerted = false;
-    enemy.fleeing = false;
-    enemy.ammo = CFG.enemy.burstRounds;
-    enemy.reloading = false;
-    enemy.fireTimer = 0;
-    enemy.pauseTimer = 0;
-    enemy.stuckTimer = 0;
-    enemy.hasLoS = false;
-    unstickEnemy();          // in case a waypoint sits too near geometry
-    shahed.alive = false;
-  } else {
-    const s = level.shahed;
-    shahed.pos.copy(s.start);
-    shahed.pos.y = CFG.shahed.altitude;
-    shahed.baseX = s.start.x;
-    shahed.escapeZ = s.escapeZ;
-    shahed.t = 0;
-    shahed.alive = true;
-    shahed.group.visible = true;
-    shahed.shadow.visible = true;
-    shahed.group.position.copy(shahed.pos);
-    shahed.shadow.position.set(shahed.pos.x, 0.12, shahed.pos.z);
-    enemy.alive = false;
-    enemy.alerted = false;
-    enemy.hasLoS = false;
-  }
+  M.reset(level);
 
   for (let i=bullets.length-1;i>=0;i--) removeBullet(i);
   burstPool.clear(); sparkPool.clear(); trailPool.clear(); smokePool.clear();
@@ -1400,8 +1444,7 @@ function animate() {
   if (state === S.FAIL) { failTimer -= rdt; if (failTimer <= 0) resetLevel(); }
 
   updatePlayer(sdt, t);
-  if (mode === 'strike') updateEnemy(sdt);
-  else                   updateShahed(sdt, t);
+  M.update(sdt, t);
   updateBullets(sdt);
   burstPool.update(sdt);
   sparkPool.update(sdt);

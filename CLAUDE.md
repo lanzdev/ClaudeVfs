@@ -12,7 +12,8 @@ choice here.
 | `index.html` | Shell only: markup, CSS, menu overlay, import map. No game logic. |
 | `config.js` | `CFG` — every tunable number. How the game *feels*. |
 | `levels.js` | Level definitions + world builders (`addBox`, `addHouse`, `addTree`, `addGrove`). The *shape* of each mission. |
-| `game.js` | Engine: renderer, particles, entities, AI, input, HUD, states, main loop. |
+| `game.js` | Engine: renderer, particles, entities, AI, input, HUD, states, main loop, and the `MODES` registry. |
+| `docs/SPLIT-PLAN.md` | The plan for splitting `game.js` into modules, and the trigger for doing it. Read before reorganising files. |
 | `fpv-3d-intercept.html` | Reference demo (not written by the project owner). Particle-morph animation. Kept as a technique reference — do not modify. |
 | `fpv-3d-intercept_annotated.html` | Heavily commented study copy of that demo. |
 
@@ -112,6 +113,20 @@ Chase a Shahed down a long corridor.
   holds recycles its oldest particles, so raising a count is always safe.
 - Two canvases are stacked: WebGL for the 3D scene, a 2D canvas overlay for
   HUD markers (target state, off-screen direction chevron, joystick).
+
+## Adding a game mode
+
+`game.js` has a `MODES` registry — the only place that knows how modes
+differ. Each mode answers a fixed set of questions (`target()`,
+`killRadius()`, `enter()`, `reset()`, `update()`, `destroyTarget()`,
+`marker()`, `status()`, optional `markerExtras()`); the engine only ever
+calls `M.<hook>()`. Adding a mode means adding one registry entry plus
+whatever entity it drives — the HUD, outcome logic and main loop stay
+untouched.
+
+**If a new mode tempts you to write `if (M.id === '...')` in shared code,
+add a hook instead.** That branch is what the registry exists to prevent —
+there were 20 of them before it, spread through the HUD and outcome code.
 
 ## Adding a level
 

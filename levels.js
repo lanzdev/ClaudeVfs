@@ -24,6 +24,22 @@ import * as THREE from 'three';
 // instead of their angle.
 // ═══════════════════════════════════════════════════════════════════
 
+// ── Deterministic randomness ──
+// Groves and tree jitter are generated, not hand-placed, but they must
+// come out IDENTICAL every time a level is built: a map the player can
+// learn, and geometry that tests can reason about. Math.random() would
+// reshuffle the forest on every level load, so levels use this seeded
+// generator instead. buildWorld() reseeds before each build.
+let _seed = 1;
+export function seedRandom(s) { _seed = s >>> 0 || 1; }
+function rnd() {
+  // xorshift32 — tiny, fast, and good enough for scattering trees
+  _seed ^= _seed << 13; _seed >>>= 0;
+  _seed ^= _seed >> 17;
+  _seed ^= _seed << 5;  _seed >>>= 0;
+  return _seed / 4294967296;
+}
+
 // Materials shared by every level (created once, never disposed).
 const MAT = {
   bunker: new THREE.MeshLambertMaterial({ color:0x1c2226 }),
@@ -37,8 +53,9 @@ const MAT = {
 
 // Opening sizes. The drone is 2.8 units wide (radius 1.4).
 export const OPENING = {
-  door:   8.0,   // wide enough to fly through with room to spare
-  window: 2.0,   // bullets and sight pass; the drone does NOT fit
+  door:   13.0,  // ~4 drones abreast: readable from altitude, and you can
+                 // fly through at speed without threading a needle
+  window:  2.2,  // bullets and sight pass; the drone does NOT fit
 };
 
 // ── Solid block (the original "wall" obstacle) ──
@@ -63,8 +80,9 @@ function addBox(api, cx, cz, sx, sz, h, mat=MAT.bunker) {
 //   side: 'n' (-Z), 's' (+Z), 'e' (+X), 'w' (-X)
 //   at:   -1..1, position along that wall (0 = centered)
 // Example: { s:[{at:0,type:'door'}], n:[{at:-0.4,type:'window'}] }
-function addHouse(api, cx, cz, w, d, openings={}, h=6.5) {
-  const T = 1.3;   // wall thickness
+function addHouse(api, cx, cz, w, d, openings={}, h=8.5) {
+  const T = 2.8;   // wall thickness — thick enough to read as masonry
+                   // from altitude, and to make a window a real embrasure
 
   // Split one wall into the segments left over between its openings.
   // Returns [start,end] spans in wall-local coordinates (-len/2..len/2).
@@ -126,7 +144,7 @@ function addHouse(api, cx, cz, w, d, openings={}, h=6.5) {
 // so a dense grove is a concealment corridor. (The enemy still HEARS
 // you inside its acoustic radius — cover is not invisibility.)
 function addTree(api, x, z, r=1.15) {
-  const h = 5 + Math.random()*4;
+  const h = 5 + rnd()*4;
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(r*0.55, r*0.75, h, 8), MAT.trunk);
   trunk.position.set(x, h/2, z);
   api.worldGroup.add(trunk);
@@ -136,7 +154,7 @@ function addTree(api, x, z, r=1.15) {
   api.worldGroup.add(c1);
   const c2 = new THREE.Mesh(new THREE.ConeGeometry(r*1.8, h*0.7, 9), MAT.leaf2);
   c2.position.set(x, h*1.18, z);
-  c2.rotation.y = Math.random()*Math.PI;
+  c2.rotation.y = rnd()*Math.PI;
   api.worldGroup.add(c2);
   api.trees.push({ x, z, r });
 }
@@ -149,12 +167,12 @@ function addGrove(api, cx, cz, radius, count, minGap=6.5) {
   const placed = [];
   let guard = count*40;
   while (placed.length < count && guard-- > 0) {
-    const a = Math.random()*Math.PI*2;
-    const rr = Math.sqrt(Math.random())*radius;    // sqrt = even area coverage
+    const a = rnd()*Math.PI*2;
+    const rr = Math.sqrt(rnd())*radius;    // sqrt = even area coverage
     const x = cx + Math.cos(a)*rr, z = cz + Math.sin(a)*rr;
     if (placed.some(p => Math.hypot(p.x-x, p.z-z) < minGap)) continue;
     placed.push({x,z});
-    addTree(api, x, z, 0.95 + Math.random()*0.45);
+    addTree(api, x, z, 0.95 + rnd()*0.45);
   }
 }
 
@@ -165,6 +183,7 @@ export const BUILDERS = { addBox, addHouse, addTree, addGrove };
 // ═══════════════════════════════════════════════════════════════════
 const level1 = {
   id: 'strike-1',
+  seed: 20260907,        // fixes the generated tree layout — change to reshuffle
   name: 'HUNTER',
   blurb: 'Cross the village · destroy the gun position',
   mode: 'strike',
@@ -187,13 +206,13 @@ const level1 = {
 
     // ── Row 2: first houses. Doors face the player (south) so the
     //    first ones you meet are obviously enterable.
-    addHouse(api, -120, 205, 30, 24, {
+    addHouse(api, -120, 205, 52, 42, {
       s: [{ at: 0,    type:'door'   }],
       n: [{ at:-0.35, type:'window' }, { at:0.45, type:'window' }],
       e: [{ at: 0,    type:'window' }],
     });
     addBox(api, -10, 195, 22, 10, 6);
-    addHouse(api, 95, 205, 26, 26, {
+    addHouse(api, 95, 205, 46, 44, {
       s: [{ at: 0.25, type:'door'   }],
       w: [{ at: 0,    type:'window' }],
       n: [{ at:-0.3,  type:'window' }],
@@ -206,7 +225,7 @@ const level1 = {
 
     // ── Row 4
     addBox(api, -150, 105, 16, 12, 7);
-    addHouse(api, -35, 95, 34, 20, {
+    addHouse(api, -35, 95, 58, 36, {
       s: [{ at:-0.5, type:'door'   }, { at:0.55, type:'window' }],
       n: [{ at: 0,   type:'door'   }],                 // through-route
       e: [{ at: 0,   type:'window' }],
@@ -222,12 +241,12 @@ const level1 = {
 
     // ── Row 6: mid-map hamlet, the halfway landmark
     addBox(api, -160, 5, 14, 10, 7);
-    addHouse(api, -55, -5, 28, 28, {
+    addHouse(api, -55, -5, 48, 46, {
       n: [{ at: 0,   type:'door'   }],
       s: [{ at: 0.3, type:'window' }],
       e: [{ at:-0.4, type:'window' }, { at:0.4, type:'window' }],
     });
-    addHouse(api, 50, 0, 24, 18, {
+    addHouse(api, 50, 0, 42, 34, {
       w: [{ at: 0,   type:'door'   }],
       n: [{ at: 0,   type:'window' }],
     });
@@ -242,7 +261,7 @@ const level1 = {
     // ── Row 8
     addBox(api, -60, -105, 18, 8, 6);
     addBox(api, 20, -110, 10, 14, 8);
-    addHouse(api, 112, -100, 26, 22, {
+    addHouse(api, 112, -100, 46, 38, {
       s: [{ at:-0.3, type:'door'   }],
       w: [{ at: 0,   type:'window' }],
     });
@@ -270,6 +289,7 @@ const level1 = {
 // ═══════════════════════════════════════════════════════════════════
 const level2 = {
   id: 'intercept-1',
+  seed: 71104,           // fixes the generated tree layout — change to reshuffle
   name: 'INTERCEPT',
   blurb: 'Chase the Shahed · detonate beneath it before the city',
   mode: 'intercept',
@@ -320,7 +340,7 @@ const level2 = {
         addGrove(api, side*42, b.z, 26, 11);
         addGrove(api, -side*30, b.z-30, 18, 6);
       } else {
-        addHouse(api, side*40, b.z, 26, 20, {
+        addHouse(api, side*40, b.z, 46, 36, {
           s: [{ at:0, type:'door' }],
           n: [{ at:0, type:'door' }],          // fly-through shortcut
           e: [{ at:0, type:'window' }],
@@ -340,10 +360,10 @@ const level2 = {
     api.worldGroup.add(strip);
     // skyline silhouette behind it, so the stakes are visible
     for (let i=0;i<14;i++) {
-      const w = 8+Math.random()*14, h = 14+Math.random()*30;
+      const w = 8+rnd()*14, h = 14+rnd()*30;
       const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, 10),
         new THREE.MeshLambertMaterial({ color:0x141a20 }));
-      b.position.set(-85 + i*13 + Math.random()*4, h/2, -1360-Math.random()*20);
+      b.position.set(-85 + i*13 + rnd()*4, h/2, -1360-rnd()*20);
       api.worldGroup.add(b);
     }
   },

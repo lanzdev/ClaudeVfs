@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CFG } from './config.js';
-import { LEVELS } from './levels.js';
+import { LEVELS, seedRandom } from './levels.js';
 
 // ═══════════════════════════════════════════════════
 // RENDERER / SCENE
@@ -344,6 +344,9 @@ function clearWorld() {
 function buildWorld(def) {
   clearWorld();
   worldBounds = def.world;
+  // Reseed first: generated geometry (groves) must come out identical
+  // every time this level is built, so the map stays learnable.
+  seedRandom(def.seed ?? 1);
   def.build({ worldGroup, boxes:obstacles, trees:treeObstacles });
 
   // visible world boundary — a red line so the edge is never a surprise
@@ -492,6 +495,7 @@ const enemy = {
   hasLoS:  false,
   moveAngle: 0,    // direction of travel; the gun rests along it while unaware
   fleeing: false,  // backing away from the player while still shooting
+  stuckTimer: 0,   // how long patrol has been unable to make progress
   waypoints: [],   // set per level
 };
 // Shape spec: a CIRCLE (head) with a STICK (gun). The gun and the
@@ -525,26 +529,67 @@ function enemyMuzzleWorld() {
   return { x: enemy.pos.x + dirX*6.2, y: 1.3, z: enemy.pos.z + dirZ*6.2 };
 }
 
-// Can the enemy body move to (x,z) without clipping the world?
+// Can the enemy body sit at (x,z) without clipping the world?
 function enemyCanStand(x, z) {
   const w = worldBounds, m = CFG.enemy.bodyRadius + 2;
   if (x < w.minX+m || x > w.maxX-m || z < w.minZ+m || z > w.maxZ-m) return false;
   return !circleHitsAnyObstacle(x, z, CFG.enemy.bodyRadius);
 }
 
-// Pick a retreat heading: straight away from the player if that is
-// clear, otherwise fan outward to either side. Returns null when it is
-// boxed in (cornered), in which case it stands and fights.
-const FLEE_FAN = [0, 0.6, -0.6, 1.2, -1.2, 1.9, -1.9];
-function pickFleeAngle(awayAngle) {
-  const probe = CFG.enemy.fleeProbe;
-  for (const off of FLEE_FAN) {
-    const a = awayAngle + off;
-    const tx = enemy.pos.x + Math.sin(a)*probe;
-    const tz = enemy.pos.z + Math.cos(a)*probe;
-    if (enemyCanStand(tx, tz)) return a;
+// Is the whole path to a point walkable, not just its endpoint? Checking
+// only the destination lets the enemy plan a route straight through a
+// wall that happens to have open ground on the far side.
+function enemyPathClear(angle, dist) {
+  for (const f of [0.35, 0.7, 1.0]) {
+    const d = dist*f;
+    if (!enemyCanStand(enemy.pos.x + Math.sin(angle)*d,
+                       enemy.pos.z + Math.cos(angle)*d)) return false;
+  }
+  return true;
+}
+
+// Pick a heading near `desired` whose path is clear, fanning outward to
+// either side. Returns null only when every direction is blocked.
+const STEER_FAN = [0, 0.5, -0.5, 1.0, -1.0, 1.5, -1.5, 2.1, -2.1, 2.7, -2.7];
+function pickHeading(desired, dist) {
+  for (const off of STEER_FAN) {
+    const a = desired + off;
+    if (enemyPathClear(a, dist)) return a;
   }
   return null;
+}
+
+// Move the enemy along a heading, sliding around obstacles. Returns the
+// distance actually covered so the caller can tell it is making progress.
+function enemyStep(angle, speed, dt) {
+  const stepLen = speed*dt;
+  for (const off of [0, 0.45, -0.45, 0.95, -0.95, 1.5, -1.5]) {
+    const a = angle + off;
+    const nx = enemy.pos.x + Math.sin(a)*stepLen;
+    const nz = enemy.pos.z + Math.cos(a)*stepLen;
+    if (enemyCanStand(nx, nz)) {
+      enemy.pos.x = nx; enemy.pos.z = nz;
+      enemy.moveAngle = a;
+      return stepLen;
+    }
+  }
+  return 0;   // pinned this frame
+}
+
+// Safety net: if the enemy ever ends up overlapping geometry (spawned
+// badly, or a level rebuilt around it), walk it out to the nearest free
+// spot instead of leaving it welded inside a wall.
+function unstickEnemy() {
+  if (enemyCanStand(enemy.pos.x, enemy.pos.z)) return false;
+  for (let r = 2; r <= 60; r += 2) {
+    for (let k = 0; k < 16; k++) {
+      const a = k/16 * Math.PI*2;
+      const x = enemy.pos.x + Math.cos(a)*r;
+      const z = enemy.pos.z + Math.sin(a)*r;
+      if (enemyCanStand(x, z)) { enemy.pos.x = x; enemy.pos.z = z; return true; }
+    }
+  }
+  return false;
 }
 
 function updateEnemy(dt) {
@@ -563,37 +608,47 @@ function updateEnemy(dt) {
   if (!inRange) enemy.alerted = false;   // drifts back to patrol if you retreat
 
   // ── Movement: flee if the drone is closing, else patrol ──
+  // Every move goes through enemyStep, which refuses to enter geometry
+  // and slides along it instead. (Patrol used to move without any
+  // collision check, which is how the enemy ended up embedded in a
+  // wall and then had nowhere legal to retreat to.)
+  unstickEnemy();
   enemy.fleeing = enemy.alerted && pdist < e.fleeRadius;
 
   if (enemy.fleeing) {
-    // back away from the player, steering around obstacles. It keeps
-    // shooting while retreating (the aim code below is unchanged), so
-    // fleeing is kiting, not disengaging.
+    // Back away from the player. It keeps shooting while retreating
+    // (the aim code below is unchanged), so fleeing is kiting, not
+    // disengaging. If every direction is blocked it stands and fights.
     const away = Math.atan2(-pdx, -pdz);
-    const a = pickFleeAngle(away);
-    if (a !== null) {
-      const nx = enemy.pos.x + Math.sin(a)*e.fleeSpeed*dt;
-      const nz = enemy.pos.z + Math.cos(a)*e.fleeSpeed*dt;
-      if (enemyCanStand(nx, nz)) { enemy.pos.x = nx; enemy.pos.z = nz; }
-      enemy.moveAngle = a;
-    }
-    // Cornered (a === null): it stops and fights where it stands.
+    const heading = pickHeading(away, e.fleeProbe) ?? away;
+    enemyStep(heading, e.fleeSpeed, dt);
     enemy.pauseTimer = 0;
+    enemy.stuckTimer = 0;
   } else {
     // ── Patrol: walk waypoint to waypoint, pause at each ──
     const wp = enemy.waypoints[enemy.wpIndex];
     if (enemy.pauseTimer > 0) {
       enemy.pauseTimer -= dt;
+      enemy.stuckTimer = 0;
     } else if (wp) {
       const dx = wp.x-enemy.pos.x, dz = wp.z-enemy.pos.z;
       const d = Math.hypot(dx, dz);
-      if (d < 1) {
+      if (d < 2.5) {
         enemy.pauseTimer = e.waypointPause;
         enemy.wpIndex = (enemy.wpIndex+1) % enemy.waypoints.length;
+        enemy.stuckTimer = 0;
       } else {
-        enemy.pos.x += dx/d * e.moveSpeed * dt;
-        enemy.pos.z += dz/d * e.moveSpeed * dt;
-        enemy.moveAngle = Math.atan2(dx, dz);  // gun rests along this while unaware
+        const want = Math.atan2(dx, dz);
+        const heading = pickHeading(want, Math.min(d, e.fleeProbe)) ?? want;
+        const moved = enemyStep(heading, e.moveSpeed, dt);
+        // If it cannot make progress for a while (fleeing left it behind
+        // an obstacle, say), give up on this waypoint and try the next
+        // one rather than grinding against a wall forever.
+        enemy.stuckTimer = moved > 0 ? 0 : enemy.stuckTimer + dt;
+        if (enemy.stuckTimer > 1.5) {
+          enemy.wpIndex = (enemy.wpIndex+1) % enemy.waypoints.length;
+          enemy.stuckTimer = 0;
+        }
       }
     }
   }
@@ -719,11 +774,18 @@ function updateShahed(dt, tAbs) {
   shahed.pos.x = shahed.baseX + Math.sin(shahed.t * Math.PI*2 / S_.weavePeriod) * S_.weaveAmp;
   shahed.pos.y = S_.altitude + Math.sin(tAbs*1.4)*0.6;
 
-  // bank into the weave — purely cosmetic, sells the turn
+  // Bank into the weave. `lateral` is the sign of the sideways velocity
+  // (+ = drifting toward +X). SIGNS ARE COUNTER-INTUITIVE HERE: the body
+  // sits at yaw π, and with Three's default XYZ order the roll is applied
+  // in the body frame *before* that 180° yaw — which mirrors how the roll
+  // reads in world space. Banking into a turn toward +X therefore needs a
+  // POSITIVE rotation.z, and yawing the nose toward +X needs π MINUS the
+  // offset. (Verified against the rotation matrices; getting either sign
+  // backwards makes it lean out of its turns.)
   const lateral = Math.cos(shahed.t * Math.PI*2 / S_.weavePeriod);
   shahed.group.position.copy(shahed.pos);
-  shahed.group.rotation.z = -lateral * 0.45;
-  shahed.group.rotation.y = Math.PI + lateral * 0.12;   // nose points -Z
+  shahed.group.rotation.z = lateral * 0.45;
+  shahed.group.rotation.y = Math.PI - lateral * 0.12;   // nose points -Z
 
   shahed.shadow.position.x = shahed.pos.x;
   shahed.shadow.position.z = shahed.pos.z;
@@ -1192,7 +1254,9 @@ function resetLevel() {
     enemy.reloading = false;
     enemy.fireTimer = 0;
     enemy.pauseTimer = 0;
+    enemy.stuckTimer = 0;
     enemy.hasLoS = false;
+    unstickEnemy();          // in case a waypoint sits too near geometry
     shahed.alive = false;
   } else {
     const s = level.shahed;

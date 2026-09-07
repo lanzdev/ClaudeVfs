@@ -71,12 +71,23 @@ Chase a Shahed down a long corridor.
 - **Two collider kinds, both flat.** Axis-aligned boxes (walls, blocks,
   house wall segments) and circles (tree trunks). Both block movement,
   bullets, and line of sight. The game is 2D underneath a 3D presentation.
-- **Houses are enterable.** Each is four walls with gaps: a `door` gap
-  (8 units) is flyable; a `window` gap (2 units) is not — the drone is 2.8
-  wide — but bullets and enemy sight pass straight through. A house is
-  cover you can hide *inside* that can still be shot into.
+- **Houses are enterable.** Each is four thick walls with gaps: a `door`
+  gap (13 units, ~4 drones abreast) is flyable at speed; a `window` gap
+  (2.2 units) is not — the drone is 2.8 wide — but bullets and enemy sight
+  pass straight through. A house is cover you can hide *inside* that can
+  still be shot into.
   **Houses must stay axis-aligned**: rotating one would require oriented-box
   tests in every collision and LoS call.
+- **Level geometry is deterministic.** Groves are generated, not
+  hand-placed, but they use a seeded xorshift RNG (`seedRandom` in
+  `levels.js`, reseeded by `buildWorld` from each level's `seed`) so the
+  same map comes out every time. `Math.random()` here would reshuffle the
+  forest on every level load, making maps unlearnable and tests flaky.
+- **Enemy movement always goes through `enemyStep`**, which refuses to
+  enter geometry and slides along it. Never move `enemy.pos` directly:
+  patrol originally did that, walked the enemy through walls, and left it
+  embedded with nowhere legal to retreat to. `unstickEnemy()` is the
+  recovery net, and a `stuckTimer` gives up on an unreachable waypoint.
 - **Trees block sight**, so a grove is a concealment corridor. Acoustic
   detection ignores cover entirely — that is the intended tension.
 - **Shahed weave tuning is a speed-budget problem.** Matching its lateral
@@ -86,6 +97,12 @@ Chase a Shahed down a long corridor.
   where the chase cannot be won at all, which reads as unfair, not hard.
 - **The camera looks straight down**, so "up" is "at the player's face":
   keep explosion cones (`spreadDeg`) well under 90° or debris flies at the lens.
+- **The Shahed's roll/yaw signs are counter-intuitive.** Its body sits at
+  yaw π, and with Three's default XYZ Euler order the roll is applied in
+  the body frame *before* that 180° yaw, which mirrors how it reads in
+  world space. Banking into a turn toward +X needs a POSITIVE `rotation.z`
+  and `π - offset` for yaw. Derive signs from the rotation matrices rather
+  than guessing; getting them backwards makes it lean out of its turns.
 - **Additive black is invisible**, so the drone's black smoke uses a
   separate normal-blended pool that fades toward the fog colour.
 - **Two clocks in the main loop:** `rdt` is real time (camera, cinematics,

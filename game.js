@@ -967,31 +967,43 @@ function updateCamera(rdt) {
 }
 
 // ═══════════════════════════════════════════════════
-// INPUT — relative virtual joystick, pointer events (touch+mouse).
-// First touch: anchors the stick where the finger lands and starts
-// the run. Finger offset FROM THE ANCHOR sets direction and speed
-// (screen up = world -Z, i.e. up the map). Finger near the anchor =
-// hover. If the finger pushes past the stick's rim, the anchor is
-// dragged along — long swipes never pin the stick at full deflection
-// in a stale direction. RELEASE = DETONATE.
+// INPUT — FIXED virtual joystick, pointer events (touch+mouse).
+// The first touch plants the stick where the finger lands and starts the
+// run. The anchor then STAYS PUT for the rest of the flight: direction is
+// the angle from anchor to finger, speed is the distance, capped at the
+// rim (screen up = world -Z, i.e. up the map). Finger near the anchor =
+// hover. RELEASE = DETONATE.
+//
+// The anchor used to slide along behind the finger once it passed the
+// rim. That made long swipes reverse quickly, but it read as "the stick
+// is still moving, so I must still be speeding up" while the output had
+// been capped since the rim — pushing further up the screen did nothing.
+// A fixed anchor makes the cap visible: the knob pins against the edge
+// and the ring lights up. The cost is that reversing after a long swipe
+// takes more thumb travel, which is the honest trade.
 // ═══════════════════════════════════════════════════
 let activePointer = null;
 let touching = false;
-const joy = { ax:0, ay:0,   // anchor (screen px)
-              fx:0, fy:0,   // finger (screen px)
-              x:0,  y:0 };  // output vector, each -1..1, deadzone applied
+const joy = { ax:0, ay:0,        // anchor (screen px) — fixed once planted
+              fx:0, fy:0,        // finger (screen px)
+              x:0,  y:0,         // output vector, each -1..1, deadzone applied
+              saturated:false }; // at full deflection — drives the HUD cue
 
 function updateJoystick() {
-  let dx = joy.fx-joy.ax, dy = joy.fy-joy.ay;
+  const dx = joy.fx-joy.ax, dy = joy.fy-joy.ay;
   const d = Math.hypot(dx, dy);
   const R = CFG.player.joyRadius;
-  if (d > R) {                 // drag the anchor along behind the finger
-    joy.ax = joy.fx - dx/d*R;
-    joy.ay = joy.fy - dy/d*R;
-    dx = dx/d*R; dy = dy/d*R;
+  if (d < CFG.player.joyDeadzone) {
+    joy.x = 0; joy.y = 0; joy.saturated = false;
+    return;
   }
-  if (d < CFG.player.joyDeadzone) { joy.x = 0; joy.y = 0; return; }
-  joy.x = dx/R; joy.y = dy/R;
+  // direction comes from the angle, magnitude from the distance capped
+  // at the rim — so travelling past the rim only ever steers, never
+  // accelerates, and the HUD says so.
+  const mag = Math.min(d, R) / R;
+  joy.x = dx/d * mag;
+  joy.y = dy/d * mag;
+  joy.saturated = d >= R;
 }
 
 canvas.addEventListener('pointerdown', e => {
@@ -1004,9 +1016,10 @@ canvas.addEventListener('pointerdown', e => {
   if (state === S.WIN)  { openMenu(); return; }
   if (state === S.FAIL) { resetLevel(); return; }
   touching = true;
-  joy.ax = joy.fx = e.clientX;
+  joy.ax = joy.fx = e.clientX;   // anchor planted here and left alone
   joy.ay = joy.fy = e.clientY;
   joy.x = joy.y = 0;
+  joy.saturated = false;
   if (state === S.READY) {
     setState(S.FLYING);
     hintEl.classList.add('off');
@@ -1022,6 +1035,7 @@ function pointerEnd(e) {
   activePointer = null;
   touching = false;
   joy.x = joy.y = 0;
+  joy.saturated = false;
   if (state === S.FLYING) detonate('DETONATED');
 }
 canvas.addEventListener('pointerup', pointerEnd);
@@ -1195,17 +1209,33 @@ function project(wx,wy,wz) {
 function drawOverlay() {
   octx.clearRect(0,0,oc.width,oc.height);
 
-  // ── virtual joystick: base ring at the anchor, knob at deflection ──
+  // ── virtual joystick ──
+  // Fixed ring at the anchor, knob at the current deflection. At full
+  // deflection the knob sits exactly on the rim and the ring brightens:
+  // that is the "this is as fast as it gets" cue. Pushing the thumb
+  // further out only steers.
   if (touching && state === S.FLYING) {
     const R = CFG.player.joyRadius;
-    octx.strokeStyle = 'rgba(0,210,255,0.25)';
-    octx.lineWidth = 1.5;
-    octx.beginPath(); octx.arc(joy.ax, joy.ay, R, 0, Math.PI*2); octx.stroke();
-    octx.fillStyle = 'rgba(0,210,255,0.10)';
+    const sat = joy.saturated;
+
+    octx.fillStyle = 'rgba(0,210,255,0.08)';
     octx.beginPath(); octx.arc(joy.ax, joy.ay, R, 0, Math.PI*2); octx.fill();
+    octx.strokeStyle = sat ? 'rgba(0,230,255,0.75)' : 'rgba(0,210,255,0.25)';
+    octx.lineWidth = sat ? 3 : 1.5;
+    octx.beginPath(); octx.arc(joy.ax, joy.ay, R, 0, Math.PI*2); octx.stroke();
+
+    // small dot marking the fixed centre, so the anchor is unmistakable
+    octx.fillStyle = 'rgba(0,210,255,0.35)';
+    octx.beginPath(); octx.arc(joy.ax, joy.ay, 3, 0, Math.PI*2); octx.fill();
+
+    // stem from centre to knob — shows how much stick is being used
     const kx = joy.ax + joy.x*R, ky = joy.ay + joy.y*R;
-    octx.fillStyle = 'rgba(0,210,255,0.55)';
-    octx.beginPath(); octx.arc(kx, ky, 14, 0, Math.PI*2); octx.fill();
+    octx.strokeStyle = 'rgba(0,210,255,0.30)';
+    octx.lineWidth = 2;
+    octx.beginPath(); octx.moveTo(joy.ax, joy.ay); octx.lineTo(kx, ky); octx.stroke();
+
+    octx.fillStyle = sat ? 'rgba(0,235,255,0.85)' : 'rgba(0,210,255,0.55)';
+    octx.beginPath(); octx.arc(kx, ky, sat ? 16 : 14, 0, Math.PI*2); octx.fill();
   }
 
   // ── target marker: the mode says who the target is and how it reads ──

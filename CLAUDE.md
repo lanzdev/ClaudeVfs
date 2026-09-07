@@ -35,11 +35,17 @@ sprite halos).
 
 Top-down 3D. The FPV drone has no weapons — only its own detonation.
 
-**Controls (both modes).** Relative virtual joystick: the first touch
-anchors the stick where the finger lands and launches; offset from that
-anchor sets direction and speed; the anchor is dragged along if the finger
-passes the rim. **Releasing the finger detonates.** The only way to
-disengage is to commit.
+**Controls (both modes).** Fixed virtual joystick: the first touch plants
+the stick where the finger lands and launches. The anchor then stays put —
+direction is the angle from anchor to finger, speed is the distance capped
+at the rim. **Releasing the finger detonates.** The only way to disengage
+is to commit.
+
+The anchor used to slide along behind the finger past the rim. Players read
+that as "the stick is still moving, so I must still be accelerating" while
+the output had been capped since the rim. With a fixed anchor the cap is
+visible: the knob pins against the edge and the ring brightens. The trade is
+that reversing after a long swipe costs more thumb travel.
 
 You also explode on: being shot, clipping an obstacle, ramming the target.
 *Any* explosion resolves the mission, so dying close enough still wins.

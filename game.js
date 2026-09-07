@@ -1107,17 +1107,50 @@ function updateBoom(rdt) {  // rdt = REAL dt: the cinematic runs on real time
 // CAMERA — follows the player from above with a slight tilt.
 // During BOOM it dives toward the explosion. `shake` decays.
 // ═══════════════════════════════════════════════════
-const camLook = LEVELS[0].playerStart.clone();
+const camLook  = LEVELS[0].playerStart.clone();
+const camFocus = new THREE.Vector3();   // where the camera wants to centre
+const camLead  = new THREE.Vector3();   // current look-ahead offset
+let leadCharge = 0;                     // 0..1, how much lead is engaged
 let shake = 0;
 
-function updateCamera(rdt) {
-  let focus, height;
+// ── Look-ahead ──
+// At speed the drone outruns what the camera shows: obstacles arrive with
+// no time to react. So the camera slides ahead along the direction of
+// travel. It eases in between `leadFrom` and `leadFull` of top speed and
+// is rate-limited by `leadRampIn`/`leadRampOut`, so it never snaps — a
+// camera that jumps ahead the instant you touch full throttle is worse
+// than no lead at all.
+function updateLead(rdt) {
+  const c = CFG.cam;
+  const speed = Math.hypot(player.vel.x, player.vel.z);
+  const frac  = speed / CFG.player.maxSpeed;
+  const want  = clamp((frac - c.leadFrom) / (c.leadFull - c.leadFrom), 0, 1);
+  // rate-limit the charge so it takes leadRampIn seconds to reach full
+  const rate = want > leadCharge ? rdt/c.leadRampIn : -rdt/c.leadRampOut;
+  leadCharge = clamp(leadCharge + clamp(want-leadCharge, -Math.abs(rate), Math.abs(rate)), 0, 1);
+  const ease = leadCharge*leadCharge*(3-2*leadCharge);   // smoothstep
+  const tx = speed > 0.5 ? player.vel.x/speed * c.leadDistance * ease : 0;
+  const tz = speed > 0.5 ? player.vel.z/speed * c.leadDistance * ease : 0;
+  // smooth the vector itself too, so hard turns swing the view around
+  // rather than flicking it
+  camLead.x = lerp(camLead.x, tx, c.leadLerp);
+  camLead.z = lerp(camLead.z, tz, c.leadLerp);
+}
+
+// Fills camFocus and returns the height the camera should sit at.
+function computeCamFocus() {
   if (state === S.BOOM || state === S.WIN) {
-    focus = boomPoint; height = CFG.cam.boomHeight;
-  } else {
-    focus = player.pos; height = CFG.cam.height;
+    camFocus.copy(boomPoint);
+    return CFG.cam.boomHeight;
   }
-  camLook.lerp(focus, CFG.cam.followLerp);
+  camFocus.set(player.pos.x + camLead.x, player.pos.y, player.pos.z + camLead.z);
+  return CFG.cam.height;
+}
+
+function updateCamera(rdt) {
+  updateLead(rdt);
+  const height = computeCamFocus();
+  camLook.lerp(camFocus, CFG.cam.followLerp);
   shake = Math.max(shake - rdt*2.5, 0);
   const sx = (Math.random()-.5)*shake*2, sz = (Math.random()-.5)*shake*2;
   camera.position.set(
@@ -1125,6 +1158,19 @@ function updateCamera(rdt) {
     lerp(camera.position.y, height, 0.05),
     camLook.z + CFG.cam.backoff + sz
   );
+  camera.lookAt(camLook.x, 0, camLook.z);
+}
+
+// Place the camera exactly, with no easing. Used whenever the level
+// (re)starts: lerping in from wherever the last run ended wastes the
+// first second of a retry and disorients more than it smooths.
+function snapCamera() {
+  camLead.set(0,0,0);
+  leadCharge = 0;
+  shake = 0;
+  const height = computeCamFocus();
+  camLook.copy(camFocus);
+  camera.position.set(camLook.x, height, camLook.z + CFG.cam.backoff);
   camera.lookAt(camLook.x, 0, camLook.z);
 }
 
@@ -1521,10 +1567,7 @@ function loadLevel(def) {
   buildWorld(def);
   M.enter(def);
 
-  camLook.copy(def.playerStart);
-  camera.position.set(def.playerStart.x, CFG.cam.height,
-                      def.playerStart.z + CFG.cam.backoff);
-  resetLevel();
+  resetLevel();          // ends with a hard camera snap
 }
 
 function resetLevel() {
@@ -1543,6 +1586,7 @@ function resetLevel() {
   timeScale = 1;
   hintEl.classList.remove('off');
   setState(S.READY);
+  snapCamera();          // no easing in from wherever the last run ended
 }
 
 function openMenu() {

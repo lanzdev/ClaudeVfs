@@ -72,6 +72,22 @@ export const CFG = {
     backoff:  26,            // pulled back on +Z so the view tilts slightly
                              // (pure top-down hides 3D forms; a little tilt sells them)
     followLerp: 0.06,
+
+    // ── Look-ahead ──
+    // At speed the drone outruns the view and obstacles arrive with no
+    // time to react, so the camera slides ahead along the direction of
+    // travel. It eases in between leadFrom and leadFull of top speed,
+    // over leadRampIn seconds, and drops back over leadRampOut.
+    leadDistance: 30,        // units ahead at full lead
+    leadFrom:     0.55,      // speed fraction where lead starts easing in
+    leadFull:     0.90,      // speed fraction for full lead
+    // These compound with followLerp, so the camera settles slower than
+    // any one of them suggests: measured end-to-end, the lead reaches its
+    // full offset about a second after you commit to full speed.
+    leadRampIn:   0.5,       // sec to wind the lead up
+    leadRampOut:  0.4,       // sec to wind it back down
+    leadLerp:     0.075,     // smoothing on the lead vector (turns swing)
+
     boomHeight: 48,          // zoomed height during detonation cinematic
     // The detonation plays in three beats. First a near-freeze, long
     // enough to read the dead object hanging in the air as a cloud of its

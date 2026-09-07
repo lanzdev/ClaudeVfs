@@ -151,6 +151,17 @@ Chase a Shahed down a long corridor.
   holds recycles its oldest particles, so raising a count is always safe.
 - Two canvases are stacked: WebGL for the 3D scene, a 2D canvas overlay for
   HUD markers (target state, off-screen direction chevron, joystick).
+- **The camera snaps on every (re)start** — `snapCamera()` at the end of
+  `resetLevel()`. Easing in from wherever the last run ended wastes the
+  first second of a retry and disorients more than it smooths.
+- **Camera look-ahead.** At speed the drone outruns the view, so the camera
+  slides ahead along the heading, easing in between `cam.leadFrom` and
+  `cam.leadFull` of top speed. Note the ramps compound with `followLerp`:
+  measured end to end, the camera crosses ahead of the drone about a
+  second after committing to full throttle. Tune against a measurement,
+  not against the individual constants — and measure *signed* lead along
+  the heading, since raw distance reads zero at the moment the camera
+  crosses from trailing to leading.
 
 ## Adding a game mode
 
